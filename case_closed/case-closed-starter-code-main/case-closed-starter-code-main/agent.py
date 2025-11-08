@@ -98,7 +98,7 @@ def send_move():
     # -----------------your code here-------------------
     # Simple example: always go RIGHT (replace this with your logic)
     # To use a boost: move = "RIGHT:BOOST"
-    move = "RIGHT"
+    move = "UP"
     
     # Example: Use boost if available and it's late in the game
     # turn_count = state.get("turn_count", 0)
