@@ -112,9 +112,22 @@ def send_move():
         x1, y1 = pos1
         x2, y2 = pos2
         
-        # Calculate wrapped distances
-        dx = min(abs(x2 - x1), board.width - abs(x2 - x1))
-        dy = min(abs(y2 - y1), board.height - abs(y2 - y1))
+        # Calculate directional distances with torus wrapping
+        # X-axis distances
+        dx_right = (x2 - x1) % board.width  # Distance going right (wraps around)
+        dx_left = (x1 - x2) % board.width   # Distance going left (wraps around)
+        
+        # Y-axis distances
+        dy_down = (y2 - y1) % board.height  # Distance going down (wraps around)
+        dy_up = (y1 - y2) % board.height    # Distance going up (wraps around)
+        
+        # Minimum distances for each axis
+        dx = min(dx_left, dx_right)
+        dy = min(dy_up, dy_down)
+        
+        print(f"Opponent Position: {opponent_pos}, My Position: {my_pos}")
+        print(f"  dx_left={dx_left}, dx_right={dx_right}, dy_up={dy_up}, dy_down={dy_down}")
+        print(f"  Min distances: dx={dx}, dy={dy}")
         
         return dx + dy
     
@@ -123,36 +136,28 @@ def send_move():
         x1, y1 = my_pos
         x2, y2 = target_pos
         
-        # Calculate x direction (consider wrapping)
-        dx = x2 - x1
-        if abs(dx) > board.width / 2:
-            dx = -(board.width - abs(dx)) if dx > 0 else (board.width - abs(dx))
+        # Calculate directional distances with torus wrapping
+        dx_right = (x2 - x1) % board.width
+        dx_left = (x1 - x2) % board.width
+        dy_down = (y2 - y1) % board.height
+        dy_up = (y1 - y2) % board.height
         
-        # Calculate y direction (consider wrapping)
-        dy = y2 - y1
-        if abs(dy) > board.height / 2:
-            dy = -(board.height - abs(dy)) if dy > 0 else (board.height - abs(dy))
+        # Create a list of (direction, distance) tuples
+        direction_distances = [
+            ("RIGHT", dx_right),
+            ("LEFT", dx_left),
+            ("DOWN", dy_down),
+            ("UP", dy_up)
+        ]
         
-        # Prioritize larger distance component
-        moves = []
-        if abs(dx) >= abs(dy):
-            if dx > 0:
-                moves.append("RIGHT")
-            elif dx < 0:
-                moves.append("LEFT")
-            if dy > 0:
-                moves.append("DOWN")
-            elif dy < 0:
-                moves.append("UP")
-        else:
-            if dy > 0:
-                moves.append("DOWN")
-            elif dy < 0:
-                moves.append("UP")
-            if dx > 0:
-                moves.append("RIGHT")
-            elif dx < 0:
-                moves.append("LEFT")
+        # Sort by distance (shortest first) to prioritize moves that shrink distance most
+        direction_distances.sort(key=lambda x: x[1])
+        
+        # Extract sorted moves
+        moves = [direction for direction, _ in direction_distances if _ > 0]
+        
+        print(f"  Direction distances: RIGHT={dx_right}, LEFT={dx_left}, DOWN={dy_down}, UP={dy_up}")
+        print(f"  Prioritized moves: {moves}")
         
         # Check if moves are safe (not hitting our own trail or walls)
         for m in moves:
