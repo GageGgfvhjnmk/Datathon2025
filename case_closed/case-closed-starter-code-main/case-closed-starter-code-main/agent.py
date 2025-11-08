@@ -4,7 +4,7 @@ from flask import Flask, request, jsonify
 from threading import Lock
 from collections import deque
 
-from case_closed_game import Game, Direction, GameResult
+from case_closed_game import Game, Direction, GameResult, EMPTY
 
 # Flask API server setup
 app = Flask(__name__)
@@ -98,8 +98,90 @@ def send_move():
     # -----------------your code here-------------------
     # Simple example: always go RIGHT (replace this with your logic)
     # To use a boost: move = "RIGHT:BOOST"
-    move = "RIGHT"
+    # Level 1: The rammer
+    # Detect opponent position
+    # Run into the opponent with the shortest path possible (preventing the wall built by the opponent)
+
+    # Get agent positions
+    opponent = GLOBAL_GAME.agent2 if player_number == 1 else GLOBAL_GAME.agent1
+    my_pos = my_agent.trail[-1]  # My current head position
+    opponent_pos = opponent.trail[-1]  # Opponent's head position
     
+    # Calculate distance considering torus wrapping
+    def torus_distance(pos1, pos2, board):
+        x1, y1 = pos1
+        x2, y2 = pos2
+        
+        # Calculate wrapped distances
+        dx = min(abs(x2 - x1), board.width - abs(x2 - x1))
+        dy = min(abs(y2 - y1), board.height - abs(y2 - y1))
+        
+        return dx + dy
+    
+    # Determine best direction to move toward opponent
+    def get_direction_to_target(my_pos, target_pos, board):
+        x1, y1 = my_pos
+        x2, y2 = target_pos
+        
+        # Calculate x direction (consider wrapping)
+        dx = x2 - x1
+        if abs(dx) > board.width / 2:
+            dx = -(board.width - abs(dx)) if dx > 0 else (board.width - abs(dx))
+        
+        # Calculate y direction (consider wrapping)
+        dy = y2 - y1
+        if abs(dy) > board.height / 2:
+            dy = -(board.height - abs(dy)) if dy > 0 else (board.height - abs(dy))
+        
+        # Prioritize larger distance component
+        moves = []
+        if abs(dx) >= abs(dy):
+            if dx > 0:
+                moves.append("RIGHT")
+            elif dx < 0:
+                moves.append("LEFT")
+            if dy > 0:
+                moves.append("DOWN")
+            elif dy < 0:
+                moves.append("UP")
+        else:
+            if dy > 0:
+                moves.append("DOWN")
+            elif dy < 0:
+                moves.append("UP")
+            if dx > 0:
+                moves.append("RIGHT")
+            elif dx < 0:
+                moves.append("LEFT")
+        
+        # Check if moves are safe (not hitting our own trail or walls)
+        for m in moves:
+            next_pos = None
+            if m == "UP":
+                next_pos = ((x1) % board.width, (y1 - 1) % board.height)
+            elif m == "DOWN":
+                next_pos = ((x1) % board.width, (y1 + 1) % board.height)
+            elif m == "LEFT":
+                next_pos = ((x1 - 1) % board.width, (y1) % board.height)
+            elif m == "RIGHT":
+                next_pos = ((x1 + 1) % board.width, (y1) % board.height)
+            
+            # Check if position is safe (not on a trail, except opponent's head)
+            if next_pos and board.get_cell_state(next_pos) == EMPTY or next_pos == opponent_pos:
+                return m
+        
+        # If no safe move found, return first option anyway
+        return moves[0] if moves else "UP"
+    
+    move = get_direction_to_target(my_pos, opponent_pos, GLOBAL_GAME.board)
+    
+    # Use boost aggressively when close to opponent
+    distance_to_opponent = torus_distance(my_pos, opponent_pos, GLOBAL_GAME.board)
+    if boosts_remaining > 0 and distance_to_opponent < 5:
+        move += ":BOOST"
+    
+    print(f'Player {player_number}: pos={my_pos}, opponent={opponent_pos}, distance={distance_to_opponent}, move={move}, boosts={boosts_remaining}')
+    print(move)
     # Example: Use boost if available and it's late in the game
     # turn_count = state.get("turn_count", 0)
     # if boosts_remaining > 0 and turn_count > 50:
