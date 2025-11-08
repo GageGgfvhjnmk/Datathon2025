@@ -66,7 +66,7 @@ def _update_local_game_from_post(data: dict):
 
 @app.route("/send-state", methods=["POST"])
 def receive_state():
-    """Judge calls this to push the current game state to the agent server.
+    """Judge calls this to push the current game state to the agent server. 
 
     The agent should update its local representation and return 200.
     """
