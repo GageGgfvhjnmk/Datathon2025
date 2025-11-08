@@ -1,50 +1,239 @@
-"""
-Sample agent for Case Closed Challenge - Works with Judge Protocol
-This agent runs as a Flask server and responds to judge requests.
-"""
-
 import os
+import uuid
 from flask import Flask, request, jsonify
-from collections import deque
 from threading import Lock
+from collections import deque
+import numpy as np
+import random
+import pickle
+from collections import defaultdict
 
 from case_closed_game import Game, Direction, GameResult, EMPTY
 
+# Flask API server setup
 app = Flask(__name__)
-
-# Basic identity
-PARTICIPANT = os.getenv("PARTICIPANT", "SampleParticipant")
-AGENT_NAME = os.getenv("AGENT_NAME", "SampleAgent")
 
 GLOBAL_GAME = Game()
 LAST_POSTED_STATE = {}
 
 game_lock = Lock()
+ 
+PARTICIPANT = "ParticipantX"
+AGENT_NAME = "AgentX"
 
-# Track game state
-game_state = {
-    "board": None,
-    "agent1_trail": [],
-    "agent2_trail": [],
-    "agent1_length": 0,
-    "agent2_length": 0,
-    "agent1_alive": True,
-    "agent2_alive": True,
-    "agent1_boosts": 3,
-    "agent2_boosts": 3,
-    "turn_count": 0,
-    "player_number": 1,
-}
+class QLearningAgent:
+    def __init__(self, alpha=0.1, gamma=0.9, epsilon=0.1):
+        self.q_table = defaultdict(lambda: np.zeros(8))  # 4 directions * 2 boost states
+        self.alpha = alpha  # Learning rate
+        self.gamma = gamma  # Discount factor
+        self.epsilon = epsilon  # Exploration rate
+        self.last_state = None
+        self.last_action = None
+        
+        # Load existing Q-table if available
+        self.load_q_table()
+    
+    def get_state_representation(self, game_state, my_agent, opponent):
+        """Convert game state to a simplified representation for Q-learning"""
+        my_pos = my_agent.trail[-1]
+        opp_pos = opponent.trail[-1]
+        
+        # Basic state features
+        state_features = []
+        
+        # 1. Danger in each direction (0 = safe, 1 = danger)
+        for dx, dy in [(1, 0), (-1, 0), (0, 1), (0, -1)]:  # RIGHT, LEFT, DOWN, UP
+            next_pos = ((my_pos[0] + dx) % 20, (my_pos[1] + dy) % 18)
+            if game_state.board.get_cell_state(next_pos) != 0 and next_pos != opp_pos:
+                state_features.append(1)  # Danger
+            else:
+                state_features.append(0)  # Safe
+        
+        # 2. Relative position to opponent
+        dx = (opp_pos[0] - my_pos[0]) % 20
+        if dx > 10: dx = dx - 20
+        dy = (opp_pos[1] - my_pos[1]) % 18
+        if dy > 9: dy = dy - 18
+        
+        # 3. Distance to opponent (discretized)
+        distance = abs(dx) + abs(dy)
+        if distance < 3:
+            state_features.append(0)  # Very close
+        elif distance < 6:
+            state_features.append(1)  # Close
+        elif distance < 10:
+            state_features.append(2)  # Medium
+        else:
+            state_features.append(3)  # Far
+        
+        # 4. Direction to opponent
+        if abs(dx) > abs(dy):
+            if dx > 0:
+                state_features.append(0)  # Right
+            else:
+                state_features.append(1)  # Left
+        else:
+            if dy > 0:
+                state_features.append(2)  # Down
+            else:
+                state_features.append(3)  # Up
+        
+        # 5. Boost available
+        state_features.append(1 if my_agent.boosts_remaining > 0 else 0)
+        
+        return tuple(state_features)
+    
+    def choose_action(self, state, boosts_remaining):
+        """Choose action using epsilon-greedy policy"""
+        if random.random() < self.epsilon:
+            # Explore: random action
+            direction = random.choice([0, 1, 2, 3])  # RIGHT, LEFT, DOWN, UP
+            use_boost = random.choice([0, 1]) if boosts_remaining > 0 else 0
+        else:
+            # Exploit: best action from Q-table
+            q_values = self.q_table[state]
+            action_index = np.argmax(q_values)
+            direction = action_index // 2
+            use_boost = action_index % 2
+        
+        return direction, use_boost
+    
+    def update_q_value(self, state, action, reward, next_state, done):
+        """Update Q-value using Q-learning formula"""
+        if self.last_state is not None and self.last_action is not None:
+            current_q = self.q_table[self.last_state][self.last_action]
+            
+            if done:
+                next_max = 0
+            else:
+                next_max = np.max(self.q_table[next_state])
+            
+            # Q-learning update
+            new_q = current_q + self.alpha * (reward + self.gamma * next_max - current_q)
+            self.q_table[self.last_state][self.last_action] = new_q
+        
+        # Store current state and action for next update
+        if not done:
+            self.last_state = state
+            self.last_action = action
+        else:
+            self.last_state = None
+            self.last_action = None
+    
+    def get_reward(self, my_agent, opponent, prev_my_alive, prev_opp_alive, game_state):
+        """Calculate reward based on game outcome and situation"""
+        reward = 0
+        
+        # Survival reward
+        if my_agent.alive:
+            reward += 1
+        
+        # Death penalty
+        if not my_agent.alive and prev_my_alive:
+            reward -= 100
+        
+        # Opponent death reward
+        if not opponent.alive and prev_opp_alive:
+            reward += 50
+        
+        # Distance to opponent (closer is better for aggressive play)
+        my_pos = my_agent.trail[-1]
+        opp_pos = opponent.trail[-1]
+        dx = (opp_pos[0] - my_pos[0]) % 20
+        if dx > 10: dx = dx - 20
+        dy = (opp_pos[1] - my_pos[1]) % 18
+        if dy > 9: dy = dy - 18
+        distance = abs(dx) + abs(dy)
+        
+        # Reward for closing distance
+        reward += (20 - distance) * 0.1
+        
+        # Penalty for being trapped
+        safe_moves = 0
+        for dx, dy in [(1, 0), (-1, 0), (0, 1), (0, -1)]:
+            next_pos = ((my_pos[0] + dx) % 20, (my_pos[1] + dy) % 18)
+            if game_state.board.get_cell_state(next_pos) == 0 or next_pos == opp_pos:
+                safe_moves += 1
+        
+        if safe_moves == 0:
+            reward -= 10
+        elif safe_moves == 1:
+            reward -= 5
+        
+        return reward
+    
+    def save_q_table(self):
+        """Save Q-table to file"""
+        with open('q_table.pkl', 'wb') as f:
+            pickle.dump(dict(self.q_table), f)
+    
+    def load_q_table(self):
+        """Load Q-table from file"""
+        try:
+            with open('q_table.pkl', 'rb') as f:
+                loaded_table = pickle.load(f)
+                self.q_table.update(loaded_table)
+            print("Loaded existing Q-table")
+        except FileNotFoundError:
+            print("No existing Q-table found, starting fresh")
+    
+    def decay_epsilon(self, episode):
+        """Decay epsilon over time to reduce exploration"""
+        self.epsilon = max(0.01, 0.1 * (0.99 ** episode))
 
+# Global Q-learning agent
+q_agent = QLearningAgent()
+
+def simple_heuristic_agent(game, my_agent, opponent):
+    """Simple heuristic agent for training"""
+    my_pos = my_agent.trail[-1]
+    opp_pos = opponent.trail[-1]
+    
+    # Calculate direction to opponent
+    dx = (opp_pos[0] - my_pos[0]) % 20
+    if dx > 10: dx = dx - 20
+    dy = (opp_pos[1] - my_pos[1]) % 18
+    if dy > 9: dy = dy - 18
+    
+    # Prefer moves toward opponent that are safe
+    safe_directions = []
+    for i, (dx, dy) in enumerate([(1, 0), (-1, 0), (0, 1), (0, -1)]):
+        next_pos = ((my_pos[0] + dx) % 20, (my_pos[1] + dy) % 18)
+        if game.board.get_cell_state(next_pos) == 0 or next_pos == opp_pos:
+            safe_directions.append(i)
+    
+    if safe_directions:
+        # Choose direction that minimizes distance to opponent
+        best_dir = None
+        best_distance = float('inf')
+        for dir_idx in safe_directions:
+            test_dx, test_dy = [(1, 0), (-1, 0), (0, 1), (0, -1)][dir_idx]
+            test_pos = ((my_pos[0] + test_dx) % 20, (my_pos[1] + test_dy) % 18)
+            dist = abs((opp_pos[0] - test_pos[0]) % 20) + abs((opp_pos[1] - test_pos[1]) % 18)
+            if dist < best_distance:
+                best_distance = dist
+                best_dir = dir_idx
+        return best_dir, 0  # Don't use boost for training opponent
+    
+    # Fallback: random safe move
+    return random.randint(0, 3), 0
 
 @app.route("/", methods=["GET"])
 def info():
-    """Basic health/info endpoint used by the judge to check connectivity."""
+    """Basic health/info endpoint used by the judge to check connectivity.
+
+    Returns participant and agent_name (so Judge.check_latency can create Agent objects).
+    """
     return jsonify({"participant": PARTICIPANT, "agent_name": AGENT_NAME}), 200
 
 
 def _update_local_game_from_post(data: dict):
-    """Update the local GLOBAL_GAME using the JSON posted by the judge."""
+    """Update the local GLOBAL_GAME using the JSON posted by the judge.
+
+    The judge posts a dictionary with keys matching the Judge.send_state payload
+    (board, agent1_trail, agent2_trail, agent1_length, agent2_length, agent1_alive,
+    agent2_alive, agent1_boosts, agent2_boosts, turn_count).
+    """
     with game_lock:
         LAST_POSTED_STATE.clear()
         LAST_POSTED_STATE.update(data)
@@ -77,251 +266,62 @@ def _update_local_game_from_post(data: dict):
 
 @app.route("/send-state", methods=["POST"])
 def receive_state():
-    """Judge calls this to push the current game state to the agent server."""
+    """Judge calls this to push the current game state to the agent server. 
+
+    The agent should update its local representation and return 200.
+    """
     data = request.get_json()
     if not data:
         return jsonify({"error": "no json body"}), 400
-    
-    # Update our local game state
     _update_local_game_from_post(data)
-    
     return jsonify({"status": "state received"}), 200
+
+
+def rl_send_move():
+    """RL-based move selection"""
+    player_number = request.args.get("player_number", default=1, type=int)
+    
+    with game_lock:
+        state = dict(LAST_POSTED_STATE)   
+        my_agent = GLOBAL_GAME.agent1 if player_number == 1 else GLOBAL_GAME.agent2
+        opponent = GLOBAL_GAME.agent2 if player_number == 1 else GLOBAL_GAME.agent1
+        boosts_remaining = my_agent.boosts_remaining
+        
+        # Store previous state for reward calculation
+        prev_my_alive = my_agent.alive
+        prev_opp_alive = opponent.alive
+    
+    # Get state representation
+    current_state = q_agent.get_state_representation(GLOBAL_GAME, my_agent, opponent)
+    
+    # Choose action
+    direction_index, use_boost = q_agent.choose_action(current_state, boosts_remaining)
+    
+    # Convert direction index to string
+    direction_map = {0: "RIGHT", 1: "LEFT", 2: "DOWN", 3: "UP"}
+    move = direction_map[direction_index]
+    
+    # Add boost if chosen and available
+    if use_boost and boosts_remaining > 0:
+        move += ":BOOST"
+    
+    # Calculate action index for Q-table (0-7)
+    action_index = direction_index * 2 + use_boost
+    
+    # Calculate reward based on previous action
+    if q_agent.last_state is not None:
+        reward = q_agent.get_reward(my_agent, opponent, prev_my_alive, prev_opp_alive, GLOBAL_GAME)
+        q_agent.update_q_value(current_state, action_index, reward, current_state, False)
+    
+    print(f'RL Agent - State: {current_state}, Action: {move}, Boost used: {use_boost}')
+    
+    return jsonify({"move": move}), 200
 
 
 @app.route("/send-move", methods=["GET"])
 def send_move():
-    """Judge calls this (GET) to request the agent's move for the current tick.
-
-    Query params the judge sends (optional): player_number, attempt_number,
-    random_moves_left, turn_count. Agents can use this to decide.
-    
-    Return format: {"move": "DIRECTION"} or {"move": "DIRECTION:BOOST"}
-    where DIRECTION is UP, DOWN, LEFT, or RIGHT
-    and :BOOST is optional to use a speed boost (move twice)
-    """
-    player_number = request.args.get("player_number", default=1, type=int)
-
-    with game_lock:
-        state = dict(LAST_POSTED_STATE)   
-        my_agent = GLOBAL_GAME.agent1 if player_number == 1 else GLOBAL_GAME.agent2
-        boosts_remaining = my_agent.boosts_remaining
-
-    #Q-table
-    #Each state will be represented as a string of the board + agent positions
-    #Actions will be UP, DOWN, LEFT, RIGHT, and optionally BOOST
-    #Action a in state s
-    #Table is agent's memory and strategy
-
-    #look up q(s,a) values
-    #Choose action with highest value
-    #Occasionally explore random action
-    #Over time, exploit more, explore less
-
-    #Training loop - observe current state, choose a, receive reward, observe next state, update q(s,a)
-    #Repeat for many episodes to learn optimal strategy
-
-    #Bellman Equation - update q(s,a) based on reward and max q(s',a') for next state s'
-    #a is learning rate
-    #Q(s,a) = Q(s,a) + a * (reward + y * max_a' Q(s',a') - Q(s,a))
-    #y is discount factor for future rewards
-    #Helps agent learn long-term strategies
-    #How much should the next be considered
-
-    #Survive as long as possible
-    #Rewards - Death Penalty (-100), Survival Reward (+1 per move), Opponent Death Reward (+50)
-    #States: (danger_left, danger_right, danger_up, danger_down)
-    #Agent is short-sighted - only immediate dangers
-
-    #More advanced state - open space can be considered
-    #DQN - for better satte
-    #Can use BFS/DFS to find out how much space
-
-    def generate_report():
-        os.system('cls')
-        board = state['board'][:]
-        report = {}
-        report['my_position'] = my_agent.trail[-1]
-        report['my_trail'] = list(my_agent.trail)
-        report['my_length'] = my_agent.length
-        report['my_boosts'] = my_agent.boosts_remaining
-        #Find my position
-        if list(report['my_position']) == state['agent1_trail'][-1]:
-            my_x, my_y = state['agent1_trail'][-1]
-            opp_x, opp_y = state['agent2_trail'][-1]
-            for y in range(len(board)):
-                for x in range(len(board[y])):
-                    if (x, y) == (my_x, my_y):
-                        board[y][x] = '\033[92mA\033[0m'  # Mark my trail on the board for visualization
-                    elif (x, y) == (opp_x, opp_y):
-                        board[y][x] = '\033[91mB\033[0m'  # Mark opponent's trail on the board for visualization
-                    elif [x,y] in state['agent1_trail'][:-1]:
-                        board[y][x] = '\033[92m█\033[0m'  # Mark my trail on the board for visualization
-                    elif [x,y] in state['agent2_trail'][:-1]:
-                        board[y][x] = '\033[91m█\033[0m'  # Mark opponent's trail on the board for visualization
-                    else:
-                        board[y][x] = '\033[90m█\033[0m'
-            
-            # in state['agent1_trail'][:-1]:
-            #     x, y = cell
-            #     board[y][x] = '\033[92m█\033[0m'  # Mark my trail on the board for visualization
-            # for cell in state['agent2_trail'][:-1]:
-            #     x, y = cell
-            #     board[y][x] = '\033[91m█\033[0m'  # Mark opponent's trail on the board for visualization
-            # for cell in 
-        else:
-            my_x, my_y = state['agent2_trail'][-1]
-            opp_x, opp_y = state['agent1_trail'][-1]
-            for cell in state['agent2_trail'][:-1]:
-                x, y = cell
-                board[y][x] = '\033[92m█\033[0m'  # Mark my trail on the board for visualization
-            for cell in state['agent1_trail'][:-1]:
-                x, y = cell
-                board[y][x] = '\033[91m█\033[0m'  # Mark opponent's trail on the board for visualization
-        print(f"My Position: {report['my_position']}, Opponent Position: {(opp_x, opp_y)}")
-        board[my_y][my_x] = f'\033[92mA\033[0m'  # Mark my position on the board for visualization
-        board[opp_y][opp_x] = f'\033[91mB\033[0m'  # Mark my position on the board for visualization
-        print("Board State:")
-        for row in board:
-            string = ''.join(str(cell) for cell in row)
-            print(string)
-        
-
-    generate_report()
-
-    # -----------------your code here-------------------
-    # Simple example: always go RIGHT (replace this with your logic)
-    # To use a boost: move = "RIGHT:BOOST"
-    # Level 1: The rammer
-    # Detect opponent position
-    # Run into the opponent with the shortest path possible (preventing the wall built by the opponent)
-
-    # Get agent positions
-    opponent = GLOBAL_GAME.agent2 if player_number == 1 else GLOBAL_GAME.agent1
-    my_pos = my_agent.trail[-1]  # My current head position
-    opponent_pos = opponent.trail[-1]  # Opponent's head position
-    
-    # Calculate distance considering torus wrapping
-    def torus_distance(pos1, pos2, board):
-        x1, y1 = pos1
-        x2, y2 = pos2
-        
-        # Calculate directional distances with torus wrapping
-        # X-axis distances
-        dx_right = (x2 - x1) % board.width  # Distance going right (wraps around)
-        dx_left = (x1 - x2) % board.width   # Distance going left (wraps around)
-        
-        # Y-axis distances
-        dy_down = (y2 - y1) % board.height  # Distance going down (wraps around)
-        dy_up = (y1 - y2) % board.height    # Distance going up (wraps around)
-        
-        # Minimum distances for each axis
-        dx = min(dx_left, dx_right)
-        dy = min(dy_up, dy_down)
-        
-        print(f"Opponent Position: {opponent_pos}, My Position: {my_pos}")
-        print(f"  dx_left={dx_left}, dx_right={dx_right}, dy_up={dy_up}, dy_down={dy_down}")
-        print(f"  Min distances: dx={dx}, dy={dy}")
-        
-        return dx + dy
-    
-    # Determine best direction to move toward opponent
-    def get_direction_to_target(my_pos, target_pos, board, my_trail):
-        x1, y1 = my_pos
-        x2, y2 = target_pos
-        
-        # Determine current direction (to avoid moving backwards)
-        current_direction = None
-        if len(my_trail) >= 2:
-            prev_pos = my_trail[-2]
-            dx = (x1 - prev_pos[0]) % board.width
-            dy = (y1 - prev_pos[1]) % board.height
-            
-            # Normalize for torus wrapping
-            if dx == board.width - 1:
-                dx = -1
-            if dy == board.height - 1:
-                dy = -1
-            
-            if dx == 1 and dy == 0:
-                current_direction = "RIGHT"
-            elif dx == -1 and dy == 0:
-                current_direction = "LEFT"
-            elif dx == 0 and dy == 1:
-                current_direction = "DOWN"
-            elif dx == 0 and dy == -1:
-                current_direction = "UP"
-        
-        # Define opposite directions
-        opposite = {"UP": "DOWN", "DOWN": "UP", "LEFT": "RIGHT", "RIGHT": "LEFT"}
-        backwards = opposite.get(current_direction) if current_direction else None
-        
-        # Calculate directional distances with torus wrapping
-        dx_right = (x2 - x1) % board.width
-        dx_left = (x1 - x2) % board.width
-        dy_down = (y2 - y1) % board.height
-        dy_up = (y1 - y2) % board.height
-        
-        # Create a list of (direction, distance, next_pos) tuples
-        direction_data = [
-            ("RIGHT", dx_right, ((x1 + 1) % board.width, y1)),
-            ("LEFT", dx_left, ((x1 - 1) % board.width, y1)),
-            ("DOWN", dy_down, (x1, (y1 + 1) % board.height)),
-            ("UP", dy_up, (x1, (y1 - 1) % board.height))
-        ]
-        
-        # Filter out backwards move
-        if backwards:
-            direction_data = [(d, dist, pos) for d, dist, pos in direction_data if d != backwards]
-        
-        # Check safety for each move and filter to only safe moves
-        safe_moves = []
-        unsafe_moves = []
-        
-        for direction, distance, next_pos in direction_data:
-            # Check if position is safe (not on a trail, except opponent's head)
-            is_safe = (board.get_cell_state(next_pos) == EMPTY) or (next_pos == target_pos)
-            
-            if is_safe:
-                safe_moves.append((direction, distance))
-            else:
-                unsafe_moves.append((direction, distance))
-        
-        # Sort safe moves by distance (shortest first)
-        safe_moves.sort(key=lambda x: x[1])
-        
-        print(f"  Current direction: {current_direction}, Backwards (filtered): {backwards}")
-        print(f"  Direction distances: RIGHT={dx_right}, LEFT={dx_left}, DOWN={dy_down}, UP={dy_up}")
-        print(f"  Safe moves (sorted): {[(d, dist) for d, dist in safe_moves]}")
-        print(f"  Unsafe moves: {[(d, dist) for d, dist in unsafe_moves]}")
-        
-        # Return the safest move with shortest distance, or any move if no safe ones
-        if safe_moves:
-            return safe_moves[0][0]
-        elif unsafe_moves:
-            # If no safe moves, sort unsafe by distance and pick shortest
-            unsafe_moves.sort(key=lambda x: x[1])
-            print(f"  WARNING: No safe moves! Choosing least bad: {unsafe_moves[0][0]}")
-            return unsafe_moves[0][0]
-        else:
-            return "UP"  # Fallback
-    
-    move = get_direction_to_target(my_pos, opponent_pos, GLOBAL_GAME.board, my_agent.trail)
-    
-    # Use boost aggressively when close to opponent
-    distance_to_opponent = torus_distance(my_pos, opponent_pos, GLOBAL_GAME.board)
-    if boosts_remaining > 0 and distance_to_opponent < 5:
-        move += ":BOOST"
-    
-    print(f'Player {player_number}: pos={my_pos}, opponent={opponent_pos}, distance={distance_to_opponent}, move={move}, boosts={boosts_remaining}')
-    print(move)
-    # Example: Use boost if available and it's late in the game
-    # turn_count = state.get("turn_count", 0)
-    # if boosts_remaining > 0 and turn_count > 50:
-    #     move = "RIGHT:BOOST"
-    # -----------------end code here--------------------
-
-    return jsonify({"move": "LEFT"}), 200
-
+    """Use RL agent for move selection"""
+    return rl_send_move()
 
 
 @app.route("/end", methods=["POST"])
@@ -329,77 +329,68 @@ def end_game():
     """Judge notifies agent that the match finished and provides final state."""
     data = request.get_json()
     if data:
-        result = data.get("result", "UNKNOWN")
-        print(f"\nGame Over! Result: {result}")
+        _update_local_game_from_post(data)
+    
+    # Save Q-table at the end of each game
+    q_agent.save_q_table()
+    
     return jsonify({"status": "acknowledged"}), 200
 
 
-def decide_move(my_trail, other_trail, turn_count, my_boosts):
-    """Simple decision logic for the agent.
-    
-    Strategy:
-    - Move in a direction that doesn't immediately hit a trail
-    - Use boost if we have them and it's mid-game (turns 30-80)
-    """
-    if not my_trail:
-        return "RIGHT"
-    
-    # Get current head position and direction
-    head = my_trail[-1] if my_trail else (0, 0)
-    
-    # Calculate current direction if we have at least 2 positions
-    current_dir = "RIGHT"
-    if len(my_trail) >= 2:
-        prev = my_trail[-2]
-        dx = head[0] - prev[0]
-        dy = head[1] - prev[1]
+# Training function (run this separately to train the agent)
+def train_rl_agent(episodes=1000):
+    """Train the RL agent by playing against itself or simple opponent"""
+    for episode in range(episodes):
+        game = Game()
+        q_agent.decay_epsilon(episode)
         
-        # Normalize for torus wrapping
-        if abs(dx) > 1:
-            dx = -1 if dx > 0 else 1
-        if abs(dy) > 1:
-            dy = -1 if dy > 0 else 1
+        # Reset agent state
+        q_agent.last_state = None
+        q_agent.last_action = None
         
-        if dx == 1:
-            current_dir = "RIGHT"
-        elif dx == -1:
-            current_dir = "LEFT"
-        elif dy == 1:
-            current_dir = "DOWN"
-        elif dy == -1:
-            current_dir = "UP"
+        prev_agent1_alive = True
+        prev_agent2_alive = True
+        
+        while game.agent1.alive and game.agent2.alive and game.turns < 200:
+            # Agent 1 move (RL)
+            state1 = q_agent.get_state_representation(game, game.agent1, game.agent2)
+            dir_idx1, boost1 = q_agent.choose_action(state1, game.agent1.boosts_remaining)
+            direction1 = [Direction.RIGHT, Direction.LEFT, Direction.DOWN, Direction.UP][dir_idx1]
+            action_idx1 = dir_idx1 * 2 + boost1
+            
+            # Agent 2 move (simple heuristic)
+            dir_idx2, boost2 = simple_heuristic_agent(game, game.agent2, game.agent1)
+            direction2 = [Direction.RIGHT, Direction.LEFT, Direction.DOWN, Direction.UP][dir_idx2]
+            
+            # Store state before move for reward calculation
+            prev_agent1_alive = game.agent1.alive
+            prev_agent2_alive = game.agent2.alive
+            
+            # Execute moves
+            game.step(direction1, direction2, boost1, boost2)
+            
+            # Update Q-values for agent 1
+            next_state1 = q_agent.get_state_representation(game, game.agent1, game.agent2)
+            reward1 = q_agent.get_reward(game.agent1, game.agent2, prev_agent1_alive, prev_agent2_alive, game)
+            done = not (game.agent1.alive and game.agent2.alive)
+            q_agent.update_q_value(next_state1, action_idx1, reward1, next_state1, done)
+        
+        # Final update for terminal state
+        if q_agent.last_state is not None:
+            final_reward = q_agent.get_reward(game.agent1, game.agent2, True, True, game)
+            q_agent.update_q_value(q_agent.last_state, q_agent.last_action, final_reward, None, True)
+        
+        if episode % 100 == 0:
+            print(f"Episode {episode}, Epsilon: {q_agent.epsilon:.3f}")
+            q_agent.save_q_table()
     
-    # Simple strategy: try to avoid trails, prefer continuing straight
-    # Check available directions (not opposite to current)
-    directions = ["UP", "DOWN", "LEFT", "RIGHT"]
-    opposite = {"UP": "DOWN", "DOWN": "UP", "LEFT": "RIGHT", "RIGHT": "LEFT"}
-    
-    # Remove opposite direction
-    if current_dir in opposite:
-        try:
-            directions.remove(opposite[current_dir])
-        except ValueError:
-            pass
-    
-    # Prefer current direction if still available
-    if current_dir in directions:
-        chosen_dir = current_dir
-    else:
-        # Pick first available
-        chosen_dir = directions[0] if directions else "RIGHT"
-    
-    # Decide whether to use boost
-    # Use boost in mid-game when we still have them
-    use_boost = my_boosts > 0 and 30 <= turn_count <= 80
-    
-    if use_boost:
-        return f"{chosen_dir}:BOOST"
-    else:
-        return chosen_dir
+    q_agent.save_q_table()
+    print("Training completed!")
 
 
 if __name__ == "__main__":
-    # For development only. Port can be overridden with the PORT env var.
+    # Uncomment the line below to train the agent
+    train_rl_agent(episodes=1000)
+    
     port = int(os.environ.get("PORT", "5009"))
-    print(f"Starting {AGENT_NAME} ({PARTICIPANT}) on port {port}...")
-    app.run(host="0.0.0.0", port=port, debug=False)
+    app.run(host="0.0.0.0", port=port, debug=True)
