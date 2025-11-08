@@ -126,21 +126,57 @@ def send_move():
     #Can use BFS/DFS to find out how much space
 
     def generate_report():
+        os.system('cls')
+        board = state['board'][:]
         report = {}
-        #Print out the report
-        print(state)
-        for row in state['board']:
-            string = ''.join(str(cell) for cell in row)
-            string = string.replace('0', '.').replace('1', '#')
-            print(row)
         report['my_position'] = my_agent.trail[-1]
         report['my_trail'] = list(my_agent.trail)
         report['my_length'] = my_agent.length
         report['my_boosts'] = my_agent.boosts_remaining
+        #Find my position
+        if list(report['my_position']) == state['agent1_trail'][-1]:
+            my_x, my_y = state['agent1_trail'][-1]
+            opp_x, opp_y = state['agent2_trail'][-1]
+            for y in range(len(board)):
+                for x in range(len(board[y])):
+                    if (x, y) == (my_x, my_y):
+                        board[y][x] = '\033[92mA\033[0m'  # Mark my trail on the board for visualization
+                    elif (x, y) == (opp_x, opp_y):
+                        board[y][x] = '\033[91mB\033[0m'  # Mark opponent's trail on the board for visualization
+                    elif [x,y] in state['agent1_trail'][:-1]:
+                        board[y][x] = '\033[92m█\033[0m'  # Mark my trail on the board for visualization
+                    elif [x,y] in state['agent2_trail'][:-1]:
+                        board[y][x] = '\033[91m█\033[0m'  # Mark opponent's trail on the board for visualization
+                    else:
+                        board[y][x] = '\033[90m█\033[0m'
+            
+            # in state['agent1_trail'][:-1]:
+            #     x, y = cell
+            #     board[y][x] = '\033[92m█\033[0m'  # Mark my trail on the board for visualization
+            # for cell in state['agent2_trail'][:-1]:
+            #     x, y = cell
+            #     board[y][x] = '\033[91m█\033[0m'  # Mark opponent's trail on the board for visualization
+            # for cell in 
+        else:
+            my_x, my_y = state['agent2_trail'][-1]
+            opp_x, opp_y = state['agent1_trail'][-1]
+            for cell in state['agent2_trail'][:-1]:
+                x, y = cell
+                board[y][x] = '\033[92m█\033[0m'  # Mark my trail on the board for visualization
+            for cell in state['agent1_trail'][:-1]:
+                x, y = cell
+                board[y][x] = '\033[91m█\033[0m'  # Mark opponent's trail on the board for visualization
+        print(f"My Position: {report['my_position']}, Opponent Position: {(opp_x, opp_y)}")
+        board[my_y][my_x] = f'\033[92mA\033[0m'  # Mark my position on the board for visualization
+        board[opp_y][opp_x] = f'\033[91mB\033[0m'  # Mark my position on the board for visualization
+        print("Board State:")
+        for row in board:
+            string = ''.join(str(cell) for cell in row)
+            print(string)
+        
 
-        print(report)
-   
     generate_report()
+
     # -----------------your code here-------------------
     # Simple example: always go RIGHT (replace this with your logic)
     # To use a boost: move = "RIGHT:BOOST"
@@ -178,9 +214,35 @@ def send_move():
         return dx + dy
     
     # Determine best direction to move toward opponent
-    def get_direction_to_target(my_pos, target_pos, board):
+    def get_direction_to_target(my_pos, target_pos, board, my_trail):
         x1, y1 = my_pos
         x2, y2 = target_pos
+        
+        # Determine current direction (to avoid moving backwards)
+        current_direction = None
+        if len(my_trail) >= 2:
+            prev_pos = my_trail[-2]
+            dx = (x1 - prev_pos[0]) % board.width
+            dy = (y1 - prev_pos[1]) % board.height
+            
+            # Normalize for torus wrapping
+            if dx == board.width - 1:
+                dx = -1
+            if dy == board.height - 1:
+                dy = -1
+            
+            if dx == 1 and dy == 0:
+                current_direction = "RIGHT"
+            elif dx == -1 and dy == 0:
+                current_direction = "LEFT"
+            elif dx == 0 and dy == 1:
+                current_direction = "DOWN"
+            elif dx == 0 and dy == -1:
+                current_direction = "UP"
+        
+        # Define opposite directions
+        opposite = {"UP": "DOWN", "DOWN": "UP", "LEFT": "RIGHT", "RIGHT": "LEFT"}
+        backwards = opposite.get(current_direction) if current_direction else None
         
         # Calculate directional distances with torus wrapping
         dx_right = (x2 - x1) % board.width
@@ -188,43 +250,52 @@ def send_move():
         dy_down = (y2 - y1) % board.height
         dy_up = (y1 - y2) % board.height
         
-        # Create a list of (direction, distance) tuples
-        direction_distances = [
-            ("RIGHT", dx_right),
-            ("LEFT", dx_left),
-            ("DOWN", dy_down),
-            ("UP", dy_up)
+        # Create a list of (direction, distance, next_pos) tuples
+        direction_data = [
+            ("RIGHT", dx_right, ((x1 + 1) % board.width, y1)),
+            ("LEFT", dx_left, ((x1 - 1) % board.width, y1)),
+            ("DOWN", dy_down, (x1, (y1 + 1) % board.height)),
+            ("UP", dy_up, (x1, (y1 - 1) % board.height))
         ]
         
-        # Sort by distance (shortest first) to prioritize moves that shrink distance most
-        direction_distances.sort(key=lambda x: x[1])
+        # Filter out backwards move
+        if backwards:
+            direction_data = [(d, dist, pos) for d, dist, pos in direction_data if d != backwards]
         
-        # Extract sorted moves
-        moves = [direction for direction, _ in direction_distances if _ > 0]
+        # Check safety for each move and filter to only safe moves
+        safe_moves = []
+        unsafe_moves = []
         
-        print(f"  Direction distances: RIGHT={dx_right}, LEFT={dx_left}, DOWN={dy_down}, UP={dy_up}")
-        print(f"  Prioritized moves: {moves}")
-        
-        # Check if moves are safe (not hitting our own trail or walls)
-        for m in moves:
-            next_pos = None
-            if m == "UP":
-                next_pos = ((x1) % board.width, (y1 - 1) % board.height)
-            elif m == "DOWN":
-                next_pos = ((x1) % board.width, (y1 + 1) % board.height)
-            elif m == "LEFT":
-                next_pos = ((x1 - 1) % board.width, (y1) % board.height)
-            elif m == "RIGHT":
-                next_pos = ((x1 + 1) % board.width, (y1) % board.height)
-            
+        for direction, distance, next_pos in direction_data:
             # Check if position is safe (not on a trail, except opponent's head)
-            if next_pos and board.get_cell_state(next_pos) == EMPTY or next_pos == opponent_pos:
-                return m
+            print(board.get_cell_state(next_pos))
+            is_safe = (board.get_cell_state(next_pos) == EMPTY) or (next_pos == target_pos)
+            
+            if is_safe:
+                safe_moves.append((direction, distance))
+            else:
+                unsafe_moves.append((direction, distance))
         
-        # If no safe move found, return first option anyway
-        return moves[0] if moves else "UP"
+        # Sort safe moves by distance (shortest first)
+        safe_moves.sort(key=lambda x: x[1])
+        
+        print(f"  Current direction: {current_direction}, Backwards (filtered): {backwards}")
+        print(f"  Direction distances: RIGHT={dx_right}, LEFT={dx_left}, DOWN={dy_down}, UP={dy_up}")
+        print(f"  Safe moves (sorted): {[(d, dist) for d, dist in safe_moves]}")
+        print(f"  Unsafe moves: {[(d, dist) for d, dist in unsafe_moves]}")
+        
+        # Return the safest move with shortest distance, or any move if no safe ones
+        if safe_moves:
+            return safe_moves[0][0]
+        elif unsafe_moves:
+            # If no safe moves, sort unsafe by distance and pick shortest
+            unsafe_moves.sort(key=lambda x: x[1])
+            print(f"  WARNING: No safe moves! Choosing least bad: {unsafe_moves[0][0]}")
+            return unsafe_moves[0][0]
+        else:
+            return "UP"  # Fallback
     
-    move = get_direction_to_target(my_pos, opponent_pos, GLOBAL_GAME.board)
+    move = get_direction_to_target(my_pos, opponent_pos, GLOBAL_GAME.board, my_agent.trail)
     
     # Use boost aggressively when close to opponent
     distance_to_opponent = torus_distance(my_pos, opponent_pos, GLOBAL_GAME.board)
@@ -240,6 +311,7 @@ def send_move():
     # -----------------end code here--------------------
 
     return jsonify({"move": move}), 200
+
 
 
 @app.route("/end", methods=["POST"])

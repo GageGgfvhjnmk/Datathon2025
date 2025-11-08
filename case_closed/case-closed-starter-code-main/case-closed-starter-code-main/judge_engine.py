@@ -210,7 +210,6 @@ class Judge:
         
         return (True, use_boost, direction)  # Return tuple: (valid, boost_flag, direction)
             
-
 def main():
     print("Judge engine starting up, waiting for agents...")
     time.sleep(5)

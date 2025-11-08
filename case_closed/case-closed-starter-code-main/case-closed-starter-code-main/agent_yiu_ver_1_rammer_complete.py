@@ -1,50 +1,39 @@
-"""
-Sample agent for Case Closed Challenge - Works with Judge Protocol
-This agent runs as a Flask server and responds to judge requests.
-"""
-
 import os
+import uuid
 from flask import Flask, request, jsonify
-from collections import deque
 from threading import Lock
+from collections import deque
 
 from case_closed_game import Game, Direction, GameResult, EMPTY
 
+# Flask API server setup
 app = Flask(__name__)
-
-# Basic identity
-PARTICIPANT = os.getenv("PARTICIPANT", "SampleParticipant")
-AGENT_NAME = os.getenv("AGENT_NAME", "SampleAgent")
 
 GLOBAL_GAME = Game()
 LAST_POSTED_STATE = {}
 
 game_lock = Lock()
-
-# Track game state
-game_state = {
-    "board": None,
-    "agent1_trail": [],
-    "agent2_trail": [],
-    "agent1_length": 0,
-    "agent2_length": 0,
-    "agent1_alive": True,
-    "agent2_alive": True,
-    "agent1_boosts": 3,
-    "agent2_boosts": 3,
-    "turn_count": 0,
-    "player_number": 1,
-}
+ 
+PARTICIPANT = "YiuRammer"
+AGENT_NAME = "RammerV1"
 
 
 @app.route("/", methods=["GET"])
 def info():
-    """Basic health/info endpoint used by the judge to check connectivity."""
+    """Basic health/info endpoint used by the judge to check connectivity.
+
+    Returns participant and agent_name (so Judge.check_latency can create Agent objects).
+    """
     return jsonify({"participant": PARTICIPANT, "agent_name": AGENT_NAME}), 200
 
 
 def _update_local_game_from_post(data: dict):
-    """Update the local GLOBAL_GAME using the JSON posted by the judge."""
+    """Update the local GLOBAL_GAME using the JSON posted by the judge.
+
+    The judge posts a dictionary with keys matching the Judge.send_state payload
+    (board, agent1_trail, agent2_trail, agent1_length, agent2_length, agent1_alive,
+    agent2_alive, agent1_boosts, agent2_boosts, turn_count).
+    """
     with game_lock:
         LAST_POSTED_STATE.clear()
         LAST_POSTED_STATE.update(data)
@@ -77,14 +66,14 @@ def _update_local_game_from_post(data: dict):
 
 @app.route("/send-state", methods=["POST"])
 def receive_state():
-    """Judge calls this to push the current game state to the agent server."""
+    """Judge calls this to push the current game state to the agent server.
+
+    The agent should update its local representation and return 200.
+    """
     data = request.get_json()
     if not data:
         return jsonify({"error": "no json body"}), 400
-    
-    # Update our local game state
     _update_local_game_from_post(data)
-    
     return jsonify({"status": "state received"}), 200
 
 
@@ -105,36 +94,6 @@ def send_move():
         state = dict(LAST_POSTED_STATE)   
         my_agent = GLOBAL_GAME.agent1 if player_number == 1 else GLOBAL_GAME.agent2
         boosts_remaining = my_agent.boosts_remaining
-
-    #Q-table
-    #Each state will be represented as a string of the board + agent positions
-    #Actions will be UP, DOWN, LEFT, RIGHT, and optionally BOOST
-    #Action a in state s
-    #Table is agent's memory and strategy
-
-    #look up q(s,a) values
-    #Choose action with highest value
-    #Occasionally explore random action
-    #Over time, exploit more, explore less
-
-    #Training loop - observe current state, choose a, receive reward, observe next state, update q(s,a)
-    #Repeat for many episodes to learn optimal strategy
-
-    #Bellman Equation - update q(s,a) based on reward and max q(s',a') for next state s'
-    #a is learning rate
-    #Q(s,a) = Q(s,a) + a * (reward + y * max_a' Q(s',a') - Q(s,a))
-    #y is discount factor for future rewards
-    #Helps agent learn long-term strategies
-    #How much should the next be considered
-
-    #Survive as long as possible
-    #Rewards - Death Penalty (-100), Survival Reward (+1 per move), Opponent Death Reward (+50)
-    #States: (danger_left, danger_right, danger_up, danger_down)
-    #Agent is short-sighted - only immediate dangers
-
-    #More advanced state - open space can be considered
-    #DQN - for better satte
-    #Can use BFS/DFS to find out how much space
 
     def generate_report():
         os.system('cls')
@@ -160,14 +119,6 @@ def send_move():
                         board[y][x] = '\033[91m█\033[0m'  # Mark opponent's trail on the board for visualization
                     else:
                         board[y][x] = '\033[90m█\033[0m'
-            
-            # in state['agent1_trail'][:-1]:
-            #     x, y = cell
-            #     board[y][x] = '\033[92m█\033[0m'  # Mark my trail on the board for visualization
-            # for cell in state['agent2_trail'][:-1]:
-            #     x, y = cell
-            #     board[y][x] = '\033[91m█\033[0m'  # Mark opponent's trail on the board for visualization
-            # for cell in 
         else:
             my_x, my_y = state['agent2_trail'][-1]
             opp_x, opp_y = state['agent1_trail'][-1]
@@ -314,92 +265,23 @@ def send_move():
     
     print(f'Player {player_number}: pos={my_pos}, opponent={opponent_pos}, distance={distance_to_opponent}, move={move}, boosts={boosts_remaining}')
     print(move)
-    # Example: Use boost if available and it's late in the game
-    # turn_count = state.get("turn_count", 0)
-    # if boosts_remaining > 0 and turn_count > 50:
-    #     move = "RIGHT:BOOST"
     # -----------------end code here--------------------
 
-    return jsonify({"move": "LEFT"}), 200
-
+    return jsonify({"move": move}), 200
 
 
 @app.route("/end", methods=["POST"])
 def end_game():
-    """Judge notifies agent that the match finished and provides final state."""
+    """Judge notifies agent that the match finished and provides final state.
+
+    We update local state for record-keeping and return OK.
+    """
     data = request.get_json()
     if data:
-        result = data.get("result", "UNKNOWN")
-        print(f"\nGame Over! Result: {result}")
+        _update_local_game_from_post(data)
     return jsonify({"status": "acknowledged"}), 200
 
 
-def decide_move(my_trail, other_trail, turn_count, my_boosts):
-    """Simple decision logic for the agent.
-    
-    Strategy:
-    - Move in a direction that doesn't immediately hit a trail
-    - Use boost if we have them and it's mid-game (turns 30-80)
-    """
-    if not my_trail:
-        return "RIGHT"
-    
-    # Get current head position and direction
-    head = my_trail[-1] if my_trail else (0, 0)
-    
-    # Calculate current direction if we have at least 2 positions
-    current_dir = "RIGHT"
-    if len(my_trail) >= 2:
-        prev = my_trail[-2]
-        dx = head[0] - prev[0]
-        dy = head[1] - prev[1]
-        
-        # Normalize for torus wrapping
-        if abs(dx) > 1:
-            dx = -1 if dx > 0 else 1
-        if abs(dy) > 1:
-            dy = -1 if dy > 0 else 1
-        
-        if dx == 1:
-            current_dir = "RIGHT"
-        elif dx == -1:
-            current_dir = "LEFT"
-        elif dy == 1:
-            current_dir = "DOWN"
-        elif dy == -1:
-            current_dir = "UP"
-    
-    # Simple strategy: try to avoid trails, prefer continuing straight
-    # Check available directions (not opposite to current)
-    directions = ["UP", "DOWN", "LEFT", "RIGHT"]
-    opposite = {"UP": "DOWN", "DOWN": "UP", "LEFT": "RIGHT", "RIGHT": "LEFT"}
-    
-    # Remove opposite direction
-    if current_dir in opposite:
-        try:
-            directions.remove(opposite[current_dir])
-        except ValueError:
-            pass
-    
-    # Prefer current direction if still available
-    if current_dir in directions:
-        chosen_dir = current_dir
-    else:
-        # Pick first available
-        chosen_dir = directions[0] if directions else "RIGHT"
-    
-    # Decide whether to use boost
-    # Use boost in mid-game when we still have them
-    use_boost = my_boosts > 0 and 30 <= turn_count <= 80
-    
-    if use_boost:
-        return f"{chosen_dir}:BOOST"
-    else:
-        return chosen_dir
-
-
 if __name__ == "__main__":
-    # For development only. Port can be overridden with the PORT env var.
-    port = int(os.environ.get("PORT", "5009"))
-    print(f"Starting {AGENT_NAME} ({PARTICIPANT}) on port {port}...")
-    app.run(host="0.0.0.0", port=port, debug=False)
+    port = int(os.environ.get("PORT", "5010"))
+    app.run(host="0.0.0.0", port=port, debug=True)
