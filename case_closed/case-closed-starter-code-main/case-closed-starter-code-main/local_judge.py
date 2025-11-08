@@ -243,12 +243,68 @@ class LocalJudge:
                 self.visualize_board()
                 time.sleep(delay)
             
+            # Store previous positions to detect collision reasons
+            agent1_prev_pos = self.game.agent1.trail[-1] if self.game.agent1.alive else None
+            agent2_prev_pos = self.game.agent2.trail[-1] if self.game.agent2.alive else None
+            
             # Get moves from both agents
             dir1, boost1 = self.send_move_agent1()
             dir2, boost2 = self.send_move_agent2()
             
+            # Calculate next positions
+            if agent1_prev_pos:
+                dx1, dy1 = dir1.value
+                agent1_next_pos = ((agent1_prev_pos[0] + dx1) % self.game.board.width,
+                                   (agent1_prev_pos[1] + dy1) % self.game.board.height)
+            else:
+                agent1_next_pos = None
+                
+            if agent2_prev_pos:
+                dx2, dy2 = dir2.value
+                agent2_next_pos = ((agent2_prev_pos[0] + dx2) % self.game.board.width,
+                                   (agent2_prev_pos[1] + dy2) % self.game.board.height)
+            else:
+                agent2_next_pos = None
+            
             # Execute the turn
             result = self.game.step(dir1, dir2, boost1, boost2)
+            
+            # Determine specific death reason and calculate score
+            if result is not None:
+                score = 0
+                death_reason = ""
+                
+                if result == GameResult.DRAW:
+                    score = 0
+                    death_reason = "Draw (both agents died or max turns)"
+                    
+                elif result == GameResult.AGENT1_WIN:
+                    # Agent 2 died - determine why
+                    if agent2_next_pos in self.game.agent2.trail:
+                        # Agent 2 hit its own trail
+                        score = 10
+                        death_reason = "Agent 2 crossed Agent 2's path (+10)"
+                    elif agent2_next_pos in self.game.agent1.trail:
+                        # Agent 2 hit Agent 1's trail
+                        score = 25
+                        death_reason = "Agent 2 crossed Agent 1's path (+25)"
+                    else:
+                        score = 10  # Default if reason unclear
+                        death_reason = "Agent 2 died (unclear reason, +10)"
+                        
+                elif result == GameResult.AGENT2_WIN:
+                    # Agent 1 died - determine why
+                    if agent1_next_pos in self.game.agent1.trail:
+                        # Agent 1 hit its own trail
+                        score = -25
+                        death_reason = "Agent 1 crossed Agent 1's path (-25)"
+                    elif agent1_next_pos in self.game.agent2.trail:
+                        # Agent 1 hit Agent 2's trail
+                        score = -10
+                        death_reason = "Agent 1 crossed Agent 2's path (-10)"
+                    else:
+                        score = -10  # Default if reason unclear
+                        death_reason = "Agent 1 died (unclear reason, -10)"
         
         # Show final board
         if visualize:
@@ -263,10 +319,11 @@ class LocalJudge:
         else:
             print("🤝 DRAW!")
         print(f"Final Scores - Agent1: {self.game.agent1.length} trail | Agent2: {self.game.agent2.length} trail")
+        print(f"Death Reason: {death_reason}")
+        print(f"Score: {score}")
         print("=" * 50)
-        pr
         
-        return result
+        return score
 
 
 if __name__ == "__main__":
