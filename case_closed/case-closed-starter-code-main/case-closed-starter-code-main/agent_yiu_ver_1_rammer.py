@@ -1,3 +1,5 @@
+from agent import *
+
 def send_move():
     """Judge calls this (GET) to request the agent's move for the current tick.
 
