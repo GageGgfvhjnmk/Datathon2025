@@ -237,6 +237,14 @@ class HeuristicGuidedDQNAgent:
             "player_number": player_number
         }
         
+        # DEBUG: Check what type board is
+        print(f"DEBUG: type(game.board.grid) = {type(game.board.grid)}")
+        if hasattr(game.board.grid, '__len__') and len(game.board.grid) > 0:
+            print(f"DEBUG: type(game.board.grid[0]) = {type(game.board.grid[0])}")
+            if hasattr(game.board.grid[0], '__len__') and len(game.board.grid[0]) > 0:
+                print(f"DEBUG: type(game.board.grid[0][0]) = {type(game.board.grid[0][0])}")
+                print(f"DEBUG: sample board values: grid[0][0]={game.board.grid[0][0]}, grid[0][1]={game.board.grid[0][1]}, grid[1][0]={game.board.grid[1][0]}")
+        
         # Get all move evaluations from heuristic
         from agent_strategies import pick_move
         
@@ -338,6 +346,19 @@ class HeuristicGuidedDQNAgent:
         # Get my player ID on the board (1 or 2)
         my_player_id = player
         
+        # DEBUG: Print board state
+        print(f"DEBUG: Player {player} position: {my_pos}")
+        print(f"DEBUG: Board dimensions: {len(board[0])}x{len(board)}")
+        print(f"DEBUG: My trail length: {len(my_trail_set)}")
+        # Print actual board values around player
+        x, y = my_pos
+        width, height = len(board[0]), len(board)
+        print(f"DEBUG: Board values around player at ({x},{y}):")
+        print(f"  UP ({x},{(y-1)%height}): {board[(y-1)%height][x]}")
+        print(f"  DOWN ({x},{(y+1)%height}): {board[(y+1)%height][x]}")
+        print(f"  LEFT ({(x-1)%width},{y}): {board[y][(x-1)%width]}")
+        print(f"  RIGHT ({(x+1)%width},{y}): {board[y][(x+1)%width]}")
+        
         # Simple evaluation for each valid direction
         for direction in DIRECTIONS:
             # Skip backwards
@@ -360,26 +381,28 @@ class HeuristicGuidedDQNAgent:
                     y = (y + dy) % height
                     
                     # CRITICAL SAFETY CHECK: Would we hit OUR OWN trail?
-                    # Check board value - if it matches our player ID, we'd hit ourselves
-                    cell_value = board[y][x]
-                    if cell_value == my_player_id:
-                        hits_own_trail = True
-                        valid = False
-                        break
+                    # Note: board uses AGENT=1 for all trails regardless of player
+                    # So we must check against our trail set, not board cell value
                     
-                    # Also check if position is in our trail set (double safety)
+                    # Check if position is in our trail set (HARD-CODED SAFETY)
                     if (x, y) in my_trail_set:
                         hits_own_trail = True
                         valid = False
+                        print(f"DEBUG: {direction} (boost={use_boost}) step {step+1}: hits own trail at ({x},{y})")
                         break
                     
                     # Check if we hit any trail (wall) - either player
-                    if cell_value != 0:
+                    # AGENT = 1 means occupied by any trail
+                    cell_value = board[y][x]
+                    print(f"DEBUG: {direction} (boost={use_boost}) step {step+1}: checking ({x},{y}), cell_value={cell_value} (numeric)")
+                    if cell_value != 0:  # 0 = EMPTY, 1 = AGENT trail
                         valid = False
+                        print(f"DEBUG: {direction} (boost={use_boost}) step {step+1}: hits occupied at ({x},{y}), cell={cell_value}")
                         break
                 
                 # HARD-CODED FILTER: Skip moves that would cause self-collision
                 if not valid or hits_own_trail:
+                    print(f"DEBUG: Skipping {direction} (boost={use_boost}): valid={valid}, hits_own={hits_own_trail}")
                     continue
                 
                 # NEW HARD-CODED SAFETY: Check if move creates a trap (negative space)
@@ -390,7 +413,10 @@ class HeuristicGuidedDQNAgent:
                 
                 if is_trapped:
                     # This move would trap us in a small space - SKIP IT!
+                    print(f"DEBUG: {direction} (boost={use_boost}) creates trap: space={available_space}")
                     continue
+                
+                print(f"DEBUG: {direction} (boost={use_boost}) is VALID! space={available_space}")
                 
                 # Create evaluation dict with realistic values
                 new_pos = (x, y)
@@ -453,6 +479,7 @@ class HeuristicGuidedDQNAgent:
                 
                 candidates.append((direction, use_boost, score, eval_dict))
         
+        print(f"DEBUG: Generated {len(candidates)} candidates")
         return candidates
     
     def select_action(self, game, player_number, training=None):
@@ -494,11 +521,8 @@ class HeuristicGuidedDQNAgent:
                 if prev_pos and (nx, ny) == prev_pos:
                     continue  # Backwards movement - skip it
                 
-                # Check if this cell is our own trail (using board grid)
-                if game.board.grid[ny][nx] == player_number:
-                    continue  # This would hit our own trail - skip it
-                
-                # Also double-check with trail set
+                # Check if this cell is in our own trail (using trail set)
+                # Note: board uses AGENT=1 for all trails, so we must check against our trail set
                 if (nx, ny) in my_trail_set:
                     continue  # Definitely our trail - skip it
                 

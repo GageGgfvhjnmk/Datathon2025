@@ -4,10 +4,10 @@ from flask import Flask, request, jsonify
 from threading import Lock
 from collections import deque
 import random
-from collections import deque
 from generate_report import generate_report
 
 from case_closed_game import Game, Direction, GameResult, EMPTY
+import RL_agent_strategy
 
 # Flask API server setup
 app = Flask(__name__)
@@ -18,7 +18,12 @@ LAST_POSTED_STATE = {}
 game_lock = Lock()
  
 PARTICIPANT = "DA_AGENT"
-AGENT_NAME = "AGENT"
+AGENT_NAME = "RL_AGENT"
+
+# Initialize the RL Agent once at startup
+RL_AGENT = RL_agent_strategy.get_rl_agent()
+RL_AGENT.epsilon = 0.0  # No exploration during competition
+RL_AGENT.training_mode = False
 
 
 @app.route("/", methods=["GET"])
@@ -43,8 +48,16 @@ def _update_local_game_from_post(data: dict):
 
         if "board" in data:
             try:
+                # DEBUG: Check what the judge is sending
+                print(f"DEBUG [agent.py]: Received board from judge, type={type(data['board'])}")
+                if hasattr(data['board'], '__len__') and len(data['board']) > 0:
+                    print(f"DEBUG [agent.py]: type(data['board'][0])={type(data['board'][0])}")
+                    if hasattr(data['board'][0], '__len__') and len(data['board'][0]) > 0:
+                        print(f"DEBUG [agent.py]: type(data['board'][0][0])={type(data['board'][0][0])}, value={data['board'][0][0]}")
+                
                 GLOBAL_GAME.board.grid = data["board"]
-            except Exception:
+            except Exception as e:
+                print(f"DEBUG [agent.py]: Error updating board: {e}")
                 pass
 
         if "agent1_trail" in data:
@@ -90,6 +103,8 @@ def send_move():
     Return format: {"move": "DIRECTION"} or {"move": "DIRECTION:BOOST"}
     where DIRECTION is UP, DOWN, LEFT, or RIGHT
     and :BOOST is optional to use a speed boost (move twice)
+    
+    Uses trained RL agent (Heuristic-Guided DQN) for decision making.
     """
     player_number = request.args.get("player_number", default=1, type=int)
 
@@ -98,124 +113,63 @@ def send_move():
         my_agent = GLOBAL_GAME.agent1 if player_number == 1 else GLOBAL_GAME.agent2
         boosts_remaining = my_agent.boosts_remaining
         report = {
-            "my_position": my_agent.trail[-1]
+            "my_position": my_agent.trail[-1] if my_agent.trail else (0, 0)
         }
         generate_report(state, report)
     
-    def pick_move(state):
-
-        DIRECTIONS = {
-            "UP": (0, -1),
-            "DOWN": (0, 1),
-            "LEFT": (-1, 0),
-            "RIGHT": (1, 0)
-        }
-
-        def in_bounds(x, y, width, height):
-            return 0 <= x < width and 0 <= y < height
-
-        def get_head_position(state, agent_id):
-            trail = state[f"agent{agent_id}_trail"]
-            return tuple(trail[-1])  # last cell is the current head
-
-        def flood_fill_score(board, start):
-            """Estimate reachable area for a given starting position."""
-            width, height = len(board[0]), len(board)
-            visited = set()
-            queue = deque([start])
-            visited.add(start)
-            score = 0
-
-            while queue:
-                x, y = queue.popleft()
-                score += 1
-                for dx, dy in DIRECTIONS.values():
-                    nx, ny = x + dx, y + dy
-                    if not in_bounds(nx, ny, width, height):
-                        continue
-                    if board[ny][nx] != 0:
-                        continue
-                    if (nx, ny) not in visited:
-                        visited.add((nx, ny))
-                        queue.append((nx, ny))
-            return score
-
-        def simulate_move(board, start, direction, boost=False):
-            """Simulate moving 1 or 2 cells in a direction.
-            Returns new position or None if collision."""
-            width, height = len(board[0]), len(board)
-            dx, dy = DIRECTIONS[direction]
-            x, y = start
-            steps = 2 if boost else 1
-
-            for _ in range(steps):
-                x += dx
-                y += dy
-                if not in_bounds(x, y, width, height):
-                    return None  # out of bounds
-                if board[y][x] != 0:
-                    return None  # collision
-                board[y][x] = 1  # mark new trail
-            return (x, y)
-
-        def choose_best_move(state):
-            board = [row[:] for row in state["board"]]
-            width, height = len(board[0]), len(board)
-            player = state["player_number"]
-            opponent = 1 if player == 2 else 2
-
-            you = get_head_position(state, player)
-            opp = get_head_position(state, opponent)
-            boosts = state[f"agent{player}_boosts"]
-
-            best_move = None
-            best_score = -float("inf")
-            use_boost = False
-
-            for direction in DIRECTIONS.keys():
-                # simulate normal move
-                for boosted in [False, True] if boosts > 0 else [False]:
-                    board_copy = [row[:] for row in board]
-                    new_pos = simulate_move(board_copy, you, direction, boost=boosted)
-                    if new_pos is None:
-                        continue
-
-                    # Compute space control
-                    area_score = flood_fill_score(board_copy, new_pos)
-                    # Slight penalty for getting close to opponent
-                    dist_penalty = abs(new_pos[0] - opp[0]) + abs(new_pos[1] - opp[1])
-                    # Boost cost (prefer saving for critical moments)
-                    boost_penalty = 4 if boosted else 0
-
-                    total_score = area_score - 0.6 * dist_penalty - boost_penalty
-
-                    if total_score > best_score:
-                        best_score = total_score
-                        best_move = direction
-                        use_boost = boosted
-
-            # fallback if nothing found
-            if not best_move:
-                valid_moves = []
-                for direction, (dx, dy) in DIRECTIONS.items():
-                    nx, ny = you[0] + dx, you[1] + dy
-                    if in_bounds(nx, ny, width, height) and board[ny][nx] == 0:
-                        valid_moves.append(direction)
-                best_move = random.choice(valid_moves) if valid_moves else "UP"
-                use_boost = False
-
-            return best_move, use_boost
-        best_move, use_boost = choose_best_move(state) 
-
+    # Use the trained RL agent to pick the best move
+    try:
+        # Get the player number from state
+        player_num = state.get("player_number", player_number)
+        
+        # Use the RL agent's select_action method
+        # It expects: select_action(game, player_number, training=False)
+        direction, use_boost = RL_AGENT.select_action(GLOBAL_GAME, player_num, False)
+        
+        # Convert Direction enum to string
+        direction_str = direction.name  # This gives "UP", "DOWN", "LEFT", "RIGHT"
+        
+        # Format the move
         if use_boost:
-            move = f"{best_move}:BOOST"
+            move = f"{direction_str}:BOOST"
         else:
-            move = best_move
-        return move
-    move = pick_move(state)
-    return jsonify({"move": move}), 200
-
-#
+            move = direction_str
+        
+        return jsonify({"move": move}), 200
+        
+    except Exception as e:
+        # Fallback to a safe random move if RL agent fails
+        print(f"RL Agent error: {e}, falling back to random safe move")
+        DIRECTIONS = ["UP", "DOWN", "LEFT", "RIGHT"]
+        
+        # Get current position
+        player_num = state.get("player_number", player_number)
+        my_trail = state.get(f"agent{player_num}_trail", [])
+        if not my_trail:
+            move = random.choice(DIRECTIONS)
+            return jsonify({"move": move}), 200
+        
+        my_pos = tuple(my_trail[-1])
+        board = state.get("board", [])
+        width = len(board[0]) if board else 25
+        height = len(board) if board else 25
+        
+        # Find a safe move (avoid collisions)
+        safe_moves = []
+        for direction in DIRECTIONS:
+            dx, dy = {"UP": (0, -1), "DOWN": (0, 1), "LEFT": (-1, 0), "RIGHT": (1, 0)}[direction]
+            nx, ny = my_pos[0] + dx, my_pos[1] + dy
+            
+            if 0 <= nx < width and 0 <= ny < height:
+                if board[ny][nx] == 0:  # EMPTY cell
+                    safe_moves.append(direction)
+        
+        if safe_moves:
+            move = random.choice(safe_moves)
+        else:
+            move = random.choice(DIRECTIONS)
+        
+        return jsonify({"move": move}), 200
 
 
 @app.route("/end", methods=["POST"])
