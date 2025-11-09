@@ -59,6 +59,54 @@ class RLTrainer:
             print('|' + ''.join(cell if cell != ' ' else '.' for cell in row) + '|')
         print("=" * (game.board.width * 2 + 2))
         
+    def check_trapped_in_negative_space(self, game, player_number, min_space=15):
+        """
+        Check if a player is trapped in a negative space (enclosed area too small)
+        Returns: (is_trapped, available_space)
+        """
+        if player_number == 1:
+            my_trail = game.agent1.trail
+            my_player_id = 1
+        else:
+            my_trail = game.agent2.trail
+            my_player_id = 2
+        
+        if not my_trail:
+            return False, 0
+        
+        # Current head position
+        head_pos = tuple(my_trail[-1])
+        my_trail_set = set(tuple(pos) for pos in my_trail)
+        
+        # Flood fill to count available space
+        width = game.board.width
+        height = game.board.height
+        board = game.board.grid
+        
+        visited = set()
+        queue = [head_pos]
+        visited.add(head_pos)
+        space_count = 0
+        
+        dir_map = [(0, -1), (0, 1), (-1, 0), (1, 0)]  # UP, DOWN, LEFT, RIGHT
+        
+        while queue and space_count <= min_space + 5:  # Stop early if enough space
+            cx, cy = queue.pop(0)
+            space_count += 1
+            
+            for dx, dy in dir_map:
+                nx = (cx + dx) % width
+                ny = (cy + dy) % height
+                
+                if (nx, ny) not in visited:
+                    # Check if cell is free (value 0 = empty)
+                    if board[ny][nx] == 0 and (nx, ny) not in my_trail_set:
+                        visited.add((nx, ny))
+                        queue.append((nx, ny))
+        
+        is_trapped = space_count < min_space
+        return is_trapped, space_count
+    
     def run_training_episode(self, episode_num, visualize=False):
         """Run one training episode with detailed reward tracking"""
         game = Game()
@@ -77,6 +125,10 @@ class RLTrainer:
         agent1_will_hit_other = False
         agent2_will_hit_own = False
         agent2_will_hit_other = False
+        
+        # Track trap detection
+        agent2_was_trapped = False
+        agent2_trap_space = 0
         
         # Optional visualization delay
         delay = 0.05 if visualize else 0
@@ -133,6 +185,13 @@ class RLTrainer:
             # Execute move
             result = game.step(dir1, dir2, boost1, boost2)
             
+            # Check if agent 2 (RL) got trapped after this move
+            if result is None:  # Game still ongoing
+                is_trapped, trap_space = self.check_trapped_in_negative_space(game, player_number=2, min_space=15)
+                if is_trapped:
+                    agent2_was_trapped = True
+                    agent2_trap_space = trap_space
+            
             # Intermediate reward (small penalty for survival to encourage winning)
             intermediate_reward = -0.1
             rewards_partial.append(intermediate_reward)
@@ -164,7 +223,11 @@ class RLTrainer:
             
         elif result == GameResult.AGENT1_WIN:
             # RL agent (Agent 2) LOSES
-            if agent2_will_hit_other:
+            if agent2_was_trapped:
+                # RL TRAPPED ITSELF in negative space - severe penalty!
+                final_reward = -100
+                death_reason = f"RL TRAPPED itself (only {agent2_trap_space} space, -100)"
+            elif agent2_will_hit_other:
                 # RL crossed opponent's path
                 final_reward = -10
                 death_reason = "RL crossed opponent's path (-10)"
@@ -238,7 +301,7 @@ class RLTrainer:
         start_time = time.time()
         
         # Track reward distribution
-        reward_counts = {25: 0, 10: 0, 0: 0, -10: 0, -25: 0}
+        reward_counts = {25: 0, 10: 0, 0: 0, -10: 0, -25: 0, -100: 0}
         
         for episode in range(1, self.episodes + 1):
             # Determine if we should visualize this episode
@@ -247,7 +310,9 @@ class RLTrainer:
             result, score, turns, death_reason = self.run_training_episode(episode, visualize=should_visualize)
             
             # Track final reward distribution
-            if "+25" in death_reason:
+            if "-100" in death_reason:
+                reward_counts[-100] += 1
+            elif "+25" in death_reason:
                 reward_counts[25] += 1
             elif "+10" in death_reason:
                 reward_counts[10] += 1
@@ -279,7 +344,7 @@ class RLTrainer:
                 
                 # Print reward distribution
                 print(f"  → Reward distribution: +25={reward_counts[25]}, +10={reward_counts[10]}, "
-                      f"0={reward_counts[0]}, -10={reward_counts[-10]}, -25={reward_counts[-25]}")
+                      f"0={reward_counts[0]}, -10={reward_counts[-10]}, -25={reward_counts[-25]}, -100={reward_counts[-100]}")
         
         # Final save
         self.rl_agent.save_model("rl_agent_final.pth")
@@ -294,11 +359,12 @@ class RLTrainer:
         print(f"Final epsilon: {self.rl_agent.epsilon:.3f}")
         print()
         print(f"Final Reward Distribution:")
-        print(f"  +25 (Opponent hit RL's trail):  {reward_counts[25]:4d} ({reward_counts[25]/self.episodes*100:5.1f}%)")
-        print(f"  +10 (Opponent hit own trail):   {reward_counts[10]:4d} ({reward_counts[10]/self.episodes*100:5.1f}%)")
-        print(f"    0 (Draw):                      {reward_counts[0]:4d} ({reward_counts[0]/self.episodes*100:5.1f}%)")
-        print(f"  -10 (RL hit opponent's trail):  {reward_counts[-10]:4d} ({reward_counts[-10]/self.episodes*100:5.1f}%)")
-        print(f"  -25 (RL hit own trail):         {reward_counts[-25]:4d} ({reward_counts[-25]/self.episodes*100:5.1f}%)")
+        print(f"  +25 (Opponent hit RL's trail):    {reward_counts[25]:4d} ({reward_counts[25]/self.episodes*100:5.1f}%)")
+        print(f"  +10 (Opponent hit own trail):     {reward_counts[10]:4d} ({reward_counts[10]/self.episodes*100:5.1f}%)")
+        print(f"    0 (Draw):                        {reward_counts[0]:4d} ({reward_counts[0]/self.episodes*100:5.1f}%)")
+        print(f"  -10 (RL hit opponent's trail):    {reward_counts[-10]:4d} ({reward_counts[-10]/self.episodes*100:5.1f}%)")
+        print(f"  -25 (RL hit own trail):           {reward_counts[-25]:4d} ({reward_counts[-25]/self.episodes*100:5.1f}%)")
+        print(f" -100 (RL TRAPPED in neg. space):  {reward_counts[-100]:4d} ({reward_counts[-100]/self.episodes*100:5.1f}%)")
         print("=" * 60)
 
 
@@ -326,9 +392,9 @@ if __name__ == "__main__":
     print()
     
     trainer = RLTrainer(
-        episodes=500,              # Number of training games
-        save_freq=50,              # Save model every N episodes
-        visualize_freq=visualize_freq  # Visualize every N episodes
+        episodes=10000,              # Number of training games
+        save_freq=1000,              # Save model every N episodes
+        visualize_freq=1000  # Visualize every N episodes
     )
     
     try:

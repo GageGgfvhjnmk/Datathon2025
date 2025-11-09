@@ -31,6 +31,7 @@ import random
 from collections import deque, namedtuple
 from case_closed_game import Direction
 import agent_strategies
+import heapq
 
 # Experience replay memory
 Experience = namedtuple('Experience', ['state', 'action', 'reward', 'next_state', 'done'])
@@ -153,6 +154,9 @@ class HeuristicGuidedDQNAgent:
         self.total_reward = 0
         self.training_mode = True
         
+        # Emergency pathfinding tracking
+        self.last_emergency_action = None
+        
     def board_to_tensor(self, board, agent1_trail, agent2_trail):
         """
         Convert board to tensor representation
@@ -249,11 +253,51 @@ class HeuristicGuidedDQNAgent:
         
         return candidates[:self.top_k]
     
+    def _check_if_trapped(self, board, new_pos, my_trail_set, my_player_id, min_space=15):
+        """
+        Check if a move creates a negative space that traps the agent
+        Returns: (is_trapped, available_space)
+        
+        HARD-CODED SAFETY: Detects if moving to new_pos creates an enclosed area too small to survive
+        """
+        width, height = len(board[0]), len(board)
+        dir_map = [(0, -1), (0, 1), (-1, 0), (1, 0)]  # UP, DOWN, LEFT, RIGHT
+        
+        # Flood fill from new position to count available empty space
+        visited = set()
+        queue = [new_pos]
+        visited.add(new_pos)
+        space_count = 0
+        
+        # Include our new position in the trail set temporarily for this check
+        temp_trail_set = my_trail_set | {new_pos}
+        
+        while queue and space_count <= min_space + 5:  # Stop early if we find enough space
+            cx, cy = queue.pop(0)
+            space_count += 1
+            
+            for dx, dy in dir_map:
+                nx = (cx + dx) % width
+                ny = (cy + dy) % height
+                
+                if (nx, ny) not in visited:
+                    # Check if cell is free (not any wall/trail)
+                    cell_value = board[ny][nx]
+                    if cell_value == 0 and (nx, ny) not in temp_trail_set:
+                        visited.add((nx, ny))
+                        queue.append((nx, ny))
+        
+        # If available space is less than minimum, we're trapped!
+        is_trapped = space_count < min_space
+        return is_trapped, space_count
+    
     def _get_heuristic_candidates(self, state):
         """
         Helper to get candidate moves from heuristic evaluation
         Uses the actual heuristic from agent_strategies for proper evaluation
-        HARD-CODED SAFETY: Filters out any move that would hit own trail
+        HARD-CODED SAFETY: 
+        - Filters out any move that would hit own trail
+        - Filters out moves that create negative space traps (NEW!)
         """
         from agent_strategies import pick_move
         import agent_strategies as ast
@@ -338,6 +382,16 @@ class HeuristicGuidedDQNAgent:
                 if not valid or hits_own_trail:
                     continue
                 
+                # NEW HARD-CODED SAFETY: Check if move creates a trap (negative space)
+                new_pos = (x, y)
+                is_trapped, available_space = self._check_if_trapped(
+                    board, new_pos, my_trail_set, my_player_id, min_space=15
+                )
+                
+                if is_trapped:
+                    # This move would trap us in a small space - SKIP IT!
+                    continue
+                
                 # Create evaluation dict with realistic values
                 new_pos = (x, y)
                 
@@ -370,6 +424,8 @@ class HeuristicGuidedDQNAgent:
                     'direction': direction,
                     'boost': use_boost,
                     'area': area,
+                    'available_space': available_space,  # NEW: space after this move
+                    'creates_trap': False,  # Already filtered out trapped moves
                     'immediate_exits': immediate_exits,
                     'avg_depth': area / max(immediate_exits, 1),
                     'dead_ends': 1 if immediate_exits <= 1 else 0,
@@ -390,8 +446,8 @@ class HeuristicGuidedDQNAgent:
                     'compactness': 0.5,
                 }
                 
-                # Simple heuristic score
-                score = area * 2 + immediate_exits * 10
+                # Simple heuristic score - bonus for more space!
+                score = area * 2 + immediate_exits * 10 + available_space * 0.5
                 if use_boost:
                     score -= 5  # Small penalty for using boost
                 
@@ -492,6 +548,211 @@ class HeuristicGuidedDQNAgent:
         }
         
         return direction_map.get(direction_str, Direction.UP), use_boost
+    
+    # ==================== EMERGENCY PATHFINDING METHODS ====================
+    # Added from emergency_dqn_agent.py for safety
+    
+    def is_in_danger(self, game, my_agent, opponent_agent, threshold=1):
+        """
+        Check if agent is in immediate danger (very few safe moves available)
+        Returns True if safe_moves <= threshold
+        """
+        safe_moves = 0
+        for direction in [Direction.UP, Direction.DOWN, Direction.LEFT, Direction.RIGHT]:
+            if self._is_safe_move(game, my_agent, direction, use_boost=False):
+                safe_moves += 1
+        return safe_moves <= threshold
+    
+    def _is_safe_move(self, game, my_agent, direction, use_boost=False):
+        """Check if a move is safe (doesn't immediately kill us)"""
+        dx, dy = direction.value
+        x, y = my_agent.trail[-1]
+        width, height = len(game.board.grid[0]), len(game.board.grid)
+        
+        steps = 2 if use_boost else 1
+        for _ in range(steps):
+            x = (x + dx) % width
+            y = (y + dy) % height
+            if game.board.grid[y][x] != 0:
+                return False
+        return True
+    
+    def find_emergency_escape(self, game, my_agent, opponent_agent):
+        """
+        Emergency A* pathfinding to find safest area on the board
+        Returns the first direction to move toward the safest area
+        """
+        # Find the safest area on the board
+        safest_pos = self._find_safest_area(game, my_agent)
+        if safest_pos is None:
+            return None
+        
+        # Use A* to find path to safest area
+        path = self._emergency_a_star(game, my_agent.trail[-1], safest_pos)
+        
+        if path and len(path) > 1:
+            # Return direction to first step in path
+            current_x, current_y = my_agent.trail[-1]
+            next_x, next_y = path[1]
+            width = len(game.board.grid[0])
+            
+            # Handle torus wrapping
+            dx = next_x - current_x
+            dy = next_y - current_y
+            
+            if abs(dx) > width // 2:
+                dx = -dx / abs(dx) * (width - abs(dx))
+            if abs(dy) > len(game.board.grid) // 2:
+                dy = -dy / abs(dy) * (len(game.board.grid) - abs(dy))
+            
+            # Convert to Direction
+            if abs(dx) > abs(dy):
+                return Direction.RIGHT if dx > 0 else Direction.LEFT
+            else:
+                return Direction.DOWN if dy > 0 else Direction.UP
+        
+        return None
+    
+    def _find_safest_area(self, game, my_agent):
+        """Find the position with the most empty space around it"""
+        max_space = 0
+        safest_pos = None
+        
+        width, height = len(game.board.grid[0]), len(game.board.grid)
+        
+        # Sample positions across the board
+        for y in range(0, height, 3):
+            for x in range(0, width, 3):
+                if game.board.grid[y][x] == 0:
+                    space = self._count_empty_space(game, (x, y), max_count=50)
+                    if space > max_space:
+                        max_space = space
+                        safest_pos = (x, y)
+        
+        return safest_pos
+    
+    def _count_empty_space(self, game, start_pos, max_count=100):
+        """Count empty spaces reachable from start_pos using flood fill"""
+        visited = set()
+        queue = deque([start_pos])
+        count = 0
+        width, height = len(game.board.grid[0]), len(game.board.grid)
+        
+        while queue and count < max_count:
+            x, y = queue.popleft()
+            
+            if (x, y) in visited:
+                continue
+            
+            if game.board.grid[y][x] != 0:
+                continue
+            
+            visited.add((x, y))
+            count += 1
+            
+            # Add neighbors (with torus wrapping)
+            for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
+                nx = (x + dx) % width
+                ny = (y + dy) % height
+                if (nx, ny) not in visited:
+                    queue.append((nx, ny))
+        
+        return count
+    
+    def _emergency_a_star(self, game, start, goal):
+        """A* pathfinding on torus board"""
+        width, height = len(game.board.grid[0]), len(game.board.grid)
+        
+        def torus_manhattan(p1, p2):
+            x1, y1 = p1
+            x2, y2 = p2
+            dx = min(abs(x2 - x1), width - abs(x2 - x1))
+            dy = min(abs(y2 - y1), height - abs(y2 - y1))
+            return dx + dy
+        
+        frontier = []
+        heapq.heappush(frontier, (0, start))
+        came_from = {start: None}
+        cost_so_far = {start: 0}
+        
+        while frontier:
+            _, current = heapq.heappop(frontier)
+            
+            if current == goal:
+                break
+            
+            x, y = current
+            for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
+                nx = (x + dx) % width
+                ny = (y + dy) % height
+                next_pos = (nx, ny)
+                
+                # Skip occupied cells
+                if game.board.grid[ny][nx] != 0:
+                    continue
+                
+                new_cost = cost_so_far[current] + 1
+                
+                if next_pos not in cost_so_far or new_cost < cost_so_far[next_pos]:
+                    cost_so_far[next_pos] = new_cost
+                    priority = new_cost + torus_manhattan(next_pos, goal)
+                    heapq.heappush(frontier, (priority, next_pos))
+                    came_from[next_pos] = current
+        
+        # Reconstruct path
+        if goal not in came_from:
+            return None
+        
+        path = []
+        current = goal
+        while current is not None:
+            path.append(current)
+            current = came_from[current]
+        path.reverse()
+        
+        return path
+    
+    def smart_act(self, state, valid_actions, game, my_agent, opponent_agent):
+        """
+        Smart action selection with emergency override
+        If in danger, use emergency pathfinding. Otherwise use normal DQN.
+        """
+        # Check if we're in immediate danger
+        if self.is_in_danger(game, my_agent, opponent_agent, threshold=1):
+            # EMERGENCY MODE: Use A* pathfinding to escape
+            emergency_direction = self.find_emergency_escape(game, my_agent, opponent_agent)
+            
+            if emergency_direction:
+                # Convert direction to action index
+                direction_to_idx = {
+                    Direction.RIGHT: 0,
+                    Direction.LEFT: 1,
+                    Direction.DOWN: 2,
+                    Direction.UP: 3
+                }
+                direction_idx = direction_to_idx.get(emergency_direction, 0)
+                action = direction_idx * 2  # No boost in emergency
+                
+                # Store for tracking
+                self.last_emergency_action = action
+                
+                if action in valid_actions:
+                    return action
+        
+        # Normal mode: use existing select_action logic
+        # Convert valid_actions back to game context
+        # This is a simplified version - in practice, integrate with existing logic
+        self.last_emergency_action = None
+        
+        # Use existing epsilon-greedy selection
+        if random.random() < self.epsilon:
+            return random.choice(valid_actions) if valid_actions else 0
+        else:
+            # Use DQN to select best action
+            # For now, just pick first valid action (you can enhance this)
+            return valid_actions[0] if valid_actions else 0
+    
+    # ==================== END EMERGENCY PATHFINDING ====================
     
     def store_experience(self, state, action, reward, next_state, done):
         """Store experience in replay memory"""
