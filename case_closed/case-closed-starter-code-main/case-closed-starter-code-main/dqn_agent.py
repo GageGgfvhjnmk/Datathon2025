@@ -233,55 +233,104 @@ class SimpleDQNAgent:
         if self.epsilon > self.epsilon_min:
             self.epsilon *= self.epsilon_decay
     
+    # In simple_dqn_agent.py, improve the reward function:
     def get_reward(self, my_agent, opponent, prev_my_alive, prev_opp_alive, game_state, action_used):
-        """Comprehensive reward function"""
+        """Comprehensive reward function with diversity bonus"""
         reward = 0
         
-        # Massive outcome rewards
+        # MASSIVE Game outcome rewards - clear signal what matters most
         if not my_agent.alive and prev_my_alive:
-            return -100.0  # Death
+            return -100.0  # Death is terrible
         
         if not opponent.alive and prev_opp_alive:
-            return 100.0   # Win
+            return 100.0   # Winning is awesome
         
-        # Base survival
+        # Base survival reward (small positive for staying alive)
         reward += 0.1
         
+        # Positioning and distance rewards
         my_pos = my_agent.trail[-1]
         opp_pos = opponent.trail[-1]
         
-        # Distance-based rewards
         dx = (opp_pos[0] - my_pos[0]) % 20
         if dx > 10: dx = dx - 20
         dy = (opp_pos[1] - my_pos[1]) % 18
         if dy > 9: dy = dy - 18
         distance = abs(dx) + abs(dy)
         
-        # Optimal distance for attacking
+        # Reward for optimal attacking distance (not too close, not too far)
         if 2 <= distance <= 6:
-            reward += 0.3
+            reward += 0.5  # Good positioning for attack
+        elif distance < 2:
+            reward -= 0.2  # Too close can be dangerous
         
-        # Safety assessment
+        # Safety assessment - CRITICAL for survival
         safe_moves = 0
         for dx, dy in [(1, 0), (-1, 0), (0, 1), (0, -1)]:
             next_pos = ((my_pos[0] + dx) % 20, (my_pos[1] + dy) % 18)
             if game_state.board.get_cell_state(next_pos) == 0 or next_pos == opp_pos:
                 safe_moves += 1
         
-        # Safety rewards
+        # Safety rewards/penalties
         if safe_moves >= 3:
-            reward += 0.2
-        elif safe_moves <= 1:
-            reward -= 0.5
+            reward += 0.3  # Good - plenty of options
+        elif safe_moves == 2:
+            reward += 0.1  # Okay
+        elif safe_moves == 1:
+            reward -= 0.5  # Dangerous - almost trapped
+        else:
+            reward -= 2.0  # Critical - completely trapped
         
-        # Boost usage penalty/reward
+        # DIVERSITY BONUS (instead of repetition penalty)
+        if len(my_agent.trail) >= 4:
+            recent_directions = []
+            for i in range(1, min(4, len(my_agent.trail))):
+                curr = my_agent.trail[-i]
+                prev = my_agent.trail[-(i+1)]
+                dx = (curr[0] - prev[0]) % 20
+                dy = (curr[1] - prev[1]) % 18
+                
+                # Normalize for torus wrapping
+                if dx == 19: dx = -1
+                if dx == -19: dx = 1
+                if dy == 17: dy = -1  
+                if dy == -17: dy = 1
+                
+                if dx == 1: recent_directions.append("RIGHT")
+                elif dx == -1: recent_directions.append("LEFT")
+                elif dy == 1: recent_directions.append("DOWN") 
+                elif dy == -1: recent_directions.append("UP")
+            
+            # Reward movement diversity
+            if len(recent_directions) >= 3:
+                unique_directions = len(set(recent_directions))
+                if unique_directions == 3:
+                    reward += 1.0  # Bonus for varied movement
+                elif unique_directions >= 2:
+                    reward += 0.3  # Small bonus for some variety
+        
+        # Strategic boost usage
         direction, used_boost = action_used
         if used_boost:
             # Only reward boost usage in good situations
             if distance < 5 and safe_moves >= 2:
-                reward += 0.5  # Good boost
+                reward += 0.8  # Good aggressive boost
+            elif safe_moves <= 1:
+                reward -= 1.0  # Bad - boosting when trapped
             else:
-                reward -= 0.3  # Bad boost
+                reward -= 0.3  # Wasteful boost
+        
+        # Small reward for having boosts available (encourage strategic use)
+        if my_agent.boosts_remaining == 3:
+            reward += 0.2
+        elif my_agent.boosts_remaining == 2:
+            reward += 0.1
+        
+        # Penalty for obvious oscillation (going back and forth)
+        if len(my_agent.trail) >= 4:
+            positions = [my_agent.trail[-1], my_agent.trail[-2], my_agent.trail[-3], my_agent.trail[-4]]
+            if len(set(positions)) <= 2:  # Only 2 unique positions in last 4 moves
+                reward -= 1.5  # Penalize obvious oscillation
         
         return reward
     
@@ -290,12 +339,12 @@ class SimpleDQNAgent:
             'model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
             'epsilon': self.epsilon
-        }, os.path.join(FILEPATH, 'simple_dqn_model.pth'))
+        }, r"C:\Users\Phillip\Desktop\coding projects\TamuDataton2025\Datathon2025\case_closed\case-closed-starter-code-main\case-closed-starter-code-main\simple_dqn_model.pth")
         print(f"Model saved (epsilon: {self.epsilon:.3f})")
     
     def load_model(self):
         try:
-            checkpoint = torch.load(os.path.join(FILEPATH, 'simple_dqn_model.pth'), map_location=self.device)
+            checkpoint = torch.load(r"C:\Users\Phillip\Desktop\coding projects\TamuDataton2025\Datathon2025\case_closed\case-closed-starter-code-main\case-closed-starter-code-main\simple_dqn_model.pth", map_location=self.device)
             self.model.load_state_dict(checkpoint['model_state_dict'])
             self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
             self.epsilon = checkpoint['epsilon']

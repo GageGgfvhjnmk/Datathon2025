@@ -106,7 +106,7 @@ def end_game():
     return jsonify({"status": "acknowledged"}), 200
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", "5010"))
+    port = int(os.environ.get("PORT", "5008"))
     print(f"DQN Agent Server starting on port {port}")
     print(f"Participant: {PARTICIPANT}, Agent: {AGENT_NAME}")
     app.run(host="0.0.0.0", port=port, debug=False)

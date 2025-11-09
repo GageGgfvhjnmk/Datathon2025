@@ -190,7 +190,8 @@ def train_advanced(episodes=2000, save_interval=100):
         while game.agent1.alive and game.agent2.alive and game.turns < 200:
             # RL Agent (Agent 1)
             state = agent.get_state_representation(game, game.agent1, game.agent2)
-            valid_actions = agent.get_valid_actions(game.agent1, game.agent1.boosts_remaining)
+            # get_valid_actions expects (game_state, my_agent, boosts_remaining, opponent)
+            valid_actions = agent.get_valid_actions(game, game.agent1, game.agent1.boosts_remaining, game.agent2)
             action = agent.act(state, valid_actions)
             
             # Convert action
