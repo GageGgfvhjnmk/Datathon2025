@@ -3,7 +3,9 @@ import uuid
 from flask import Flask, request, jsonify
 from threading import Lock
 from collections import deque
-import agent_yiu_ver_1_rammer as ram
+import random
+from collections import deque
+from generate_report import generate_report
 
 from case_closed_game import Game, Direction, GameResult, EMPTY
 
@@ -15,8 +17,8 @@ LAST_POSTED_STATE = {}
 
 game_lock = Lock()
  
-PARTICIPANT = "ParticipantX"
-AGENT_NAME = "AgentX"
+PARTICIPANT = "DA_AGENT"
+AGENT_NAME = "AGENT"
 
 
 @app.route("/", methods=["GET"])
@@ -89,7 +91,129 @@ def send_move():
     where DIRECTION is UP, DOWN, LEFT, or RIGHT
     and :BOOST is optional to use a speed boost (move twice)
     """
-    return ram.send_move()
+    player_number = request.args.get("player_number", default=1, type=int)
+
+    with game_lock:
+        state = dict(LAST_POSTED_STATE)   
+        my_agent = GLOBAL_GAME.agent1 if player_number == 1 else GLOBAL_GAME.agent2
+        boosts_remaining = my_agent.boosts_remaining
+        report = {
+            "my_position": my_agent.trail[-1]
+        }
+        generate_report(state, report)
+    
+    def pick_move(state):
+
+        DIRECTIONS = {
+            "UP": (0, -1),
+            "DOWN": (0, 1),
+            "LEFT": (-1, 0),
+            "RIGHT": (1, 0)
+        }
+
+        def in_bounds(x, y, width, height):
+            return 0 <= x < width and 0 <= y < height
+
+        def get_head_position(state, agent_id):
+            trail = state[f"agent{agent_id}_trail"]
+            return tuple(trail[-1])  # last cell is the current head
+
+        def flood_fill_score(board, start):
+            """Estimate reachable area for a given starting position."""
+            width, height = len(board[0]), len(board)
+            visited = set()
+            queue = deque([start])
+            visited.add(start)
+            score = 0
+
+            while queue:
+                x, y = queue.popleft()
+                score += 1
+                for dx, dy in DIRECTIONS.values():
+                    nx, ny = x + dx, y + dy
+                    if not in_bounds(nx, ny, width, height):
+                        continue
+                    if board[ny][nx] != 0:
+                        continue
+                    if (nx, ny) not in visited:
+                        visited.add((nx, ny))
+                        queue.append((nx, ny))
+            return score
+
+        def simulate_move(board, start, direction, boost=False):
+            """Simulate moving 1 or 2 cells in a direction.
+            Returns new position or None if collision."""
+            width, height = len(board[0]), len(board)
+            dx, dy = DIRECTIONS[direction]
+            x, y = start
+            steps = 2 if boost else 1
+
+            for _ in range(steps):
+                x += dx
+                y += dy
+                if not in_bounds(x, y, width, height):
+                    return None  # out of bounds
+                if board[y][x] != 0:
+                    return None  # collision
+                board[y][x] = 1  # mark new trail
+            return (x, y)
+
+        def choose_best_move(state):
+            board = [row[:] for row in state["board"]]
+            width, height = len(board[0]), len(board)
+            player = state["player_number"]
+            opponent = 1 if player == 2 else 2
+
+            you = get_head_position(state, player)
+            opp = get_head_position(state, opponent)
+            boosts = state[f"agent{player}_boosts"]
+
+            best_move = None
+            best_score = -float("inf")
+            use_boost = False
+
+            for direction in DIRECTIONS.keys():
+                # simulate normal move
+                for boosted in [False, True] if boosts > 0 else [False]:
+                    board_copy = [row[:] for row in board]
+                    new_pos = simulate_move(board_copy, you, direction, boost=boosted)
+                    if new_pos is None:
+                        continue
+
+                    # Compute space control
+                    area_score = flood_fill_score(board_copy, new_pos)
+                    # Slight penalty for getting close to opponent
+                    dist_penalty = abs(new_pos[0] - opp[0]) + abs(new_pos[1] - opp[1])
+                    # Boost cost (prefer saving for critical moments)
+                    boost_penalty = 4 if boosted else 0
+
+                    total_score = area_score - 0.6 * dist_penalty - boost_penalty
+
+                    if total_score > best_score:
+                        best_score = total_score
+                        best_move = direction
+                        use_boost = boosted
+
+            # fallback if nothing found
+            if not best_move:
+                valid_moves = []
+                for direction, (dx, dy) in DIRECTIONS.items():
+                    nx, ny = you[0] + dx, you[1] + dy
+                    if in_bounds(nx, ny, width, height) and board[ny][nx] == 0:
+                        valid_moves.append(direction)
+                best_move = random.choice(valid_moves) if valid_moves else "UP"
+                use_boost = False
+
+            return best_move, use_boost
+        best_move, use_boost = choose_best_move(state) 
+
+        if use_boost:
+            move = f"{best_move}:BOOST"
+        else:
+            move = best_move
+        return move
+    move = pick_move(state)
+    return jsonify({"move": move}), 200
 
 #
 

@@ -118,8 +118,9 @@ class Agent:
             cur_dx, cur_dy = self.direction.value
             req_dx, req_dy = direction.value
             if (req_dx, req_dy) == (-cur_dx, -cur_dy):
-                print('invalid move')
-                continue  # Skip this move if invalid direction
+                print(f'Agent {self.agent_id} made invalid move (moving backwards)')
+                self.alive = False
+                return False  # Invalid move causes death
             
             head = self.trail[-1]
             dx, dy = direction.value

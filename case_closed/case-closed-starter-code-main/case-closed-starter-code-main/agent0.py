@@ -3,7 +3,7 @@ import uuid
 from flask import Flask, request, jsonify
 from threading import Lock
 from collections import deque
-
+from generate_report import generate_report
 from case_closed_game import Game, Direction, GameResult
 
 # Flask API server setup
@@ -14,8 +14,8 @@ LAST_POSTED_STATE = {}
 
 game_lock = Lock()
  
-PARTICIPANT = "ParticipantX"
-AGENT_NAME = "AgentX"
+PARTICIPANT = "AGENT0"
+AGENT_NAME = "AGENT0"
 
 @app.route("/", methods=["GET"])
 def info():
@@ -93,6 +93,12 @@ def send_move():
         state = dict(LAST_POSTED_STATE)   
         my_agent = GLOBAL_GAME.agent1 if player_number == 1 else GLOBAL_GAME.agent2
         boosts_remaining = my_agent.boosts_remaining
+        report = {
+            
+        }
+        report['my_position'] = my_agent.trail[-1]
+        generate_report(state, report)
+
    
     # -----------------your code here-------------------
     # Simple example: always go RIGHT (replace this with your logic)
@@ -112,7 +118,7 @@ def send_move():
     #   opposite = {"UP": "LEFT", "DOWN": "RIGHT", "LEFT": "DOWN", "RIGHT": "UP"}
     #   move = opposite[direction.name]
     # else:
-    print("DIRECTION:", direction.name)
+    # print("DIRECTION:", direction.name)
     opposite = {"UP": "LEFT", "DOWN": "RIGHT", "LEFT": "DOWN", "RIGHT": "UP"}
     move = opposite[direction.name]
     
@@ -141,5 +147,5 @@ def end_game():
 
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", "5008"))
+    port = int(os.environ.get("PORT", "5009"))
     app.run(host="0.0.0.0", port=port, debug=True)
