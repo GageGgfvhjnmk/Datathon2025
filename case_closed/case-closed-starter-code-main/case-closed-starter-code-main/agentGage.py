@@ -1,82 +1,119 @@
-# gage_logic.py
 from typing import Tuple, List, Optional
 import agent
 from case_closed_game import Direction, EMPTY
+import numpy as np
 
-# Order also serves as the tie-break priority
-DIRS: List[Tuple[str, Tuple[int, int], Direction]] = [
-    ("UP",    ( 0, -1), Direction.UP),
-    ("RIGHT", ( 1,  0), Direction.RIGHT),
-    ("DOWN",  ( 0,  1), Direction.DOWN),
-    ("LEFT",  (-1,  0), Direction.LEFT),
-]
 
-def _wrap(x: int, y: int, w: int, h: int) -> Tuple[int, int]:
-    return x % w, y % h
-
-def _is_wall(board, x: int, y: int) -> bool:
-    # Board uses torus semantics internally; get_cell_state normalizes
-    return board.get_cell_state((x, y)) != EMPTY
-
-def _head_xy(my_trail) -> Tuple[int, int]:
-    # trail is a deque/list of (x, y); head is last entry
-    hx, hy = my_trail[-1]
-    return hx, hy
-
-def _window_avg_ahead(board, hx: int, hy: int, vec: Tuple[int, int], size: int = 7) -> float:
-    """
-    Average 'walliness' in a size×size window pushed forward along vec.
-    We center the window ~half the window (3) ahead to bias lookahead.
-    """
-    w, h = board.width, board.height
-    dx, dy = vec
-    push = size // 2  # 3 for 7x7
-
-    cx, cy = _wrap(hx + dx * push, hy + dy * push, w, h)
-    half = size // 2
-
-    total = 0
-    for oy in range(-half, half + 1):
-        for ox in range(-half, half + 1):
-            x, y = _wrap(cx + ox, cy + oy, w, h)
-            total += 1 if _is_wall(board, x, y) else 0
-
-    return total / float(size * size)
-
-def gage_logic() -> str:
-    """
-    Returns one of: 'UP', 'RIGHT', 'DOWN', 'LEFT'
-    Uses agent.GLOBAL_GAME + agent.LAST_POSTED_STATE to decide.
-    """
+def gage_logic(player_number):
     game = agent.GLOBAL_GAME
     board = game.board
 
-    # Prefer player_number from the last posted state; default to 1 if absent
-    pnum = (agent.LAST_POSTED_STATE or {}).get("player_number", 1)
+    my_agent = game.agent1 if player_number == 1 else game.agent2
+    other = game.agent2 if player_number == 1 else game.agent1
+    
+    print("Pass 1")
 
-    my_agent = game.agent1 if pnum == 1 else game.agent2
-    hx, hy = _head_xy(my_agent.trail)
+    head = my_agent.trail[-1]
+    lowest = 10000
+    lowest_dir = my_agent.direction  # fallback
 
+    print("pass 2")
+
+    grid_np = np.array(board.grid)  # kept to minimize edits; not required for the loop fill
     w, h = board.width, board.height
 
-    # 1) Filter: immediate neighbor must be free
-    candidates: List[Tuple[str, Tuple[int, int], Direction]] = []
-    for name, (dx, dy), enum_dir in DIRS:
-        nx, ny = _wrap(hx + dx, hy + dy, w, h)
-        if not _is_wall(board, nx, ny):
-            candidates.append((name, (dx, dy), enum_dir))
+    for dir_enum in [Direction.UP, Direction.RIGHT, Direction.DOWN, Direction.LEFT]:
+        ddx, ddy = dir_enum.value
+        pos = board._torus_check((head[0] + ddx, head[1] + ddy))
 
-    if not candidates:
-        # Boxed in: pick something deterministic
-        return "UP"
+        print("pass 3")
+        if other and other.alive and pos in (other.trail + my_agent.trail):
+            continue
 
-    # 2) For each candidate, compute 7×7 'ahead' average and pick the minimum
-    best_name: Optional[str] = None
-    best_score: Optional[float] = None
-    for name, vec, _enum_dir in candidates:
-        avg = _window_avg_ahead(board, hx, hy, vec, size=7)
-        if best_score is None or avg < best_score:
-            best_name = name
-            best_score = avg
+        # center point of the window, wrapped
+        cx, cy = board._torus_check((head[0] + 4 * ddx, head[1] + 4 * ddy))
 
-    return best_name or "UP"
+        # CHANGED: build a 6x6 NumPy matrix by filling it via a wrapped for loop (y first, then x)
+        matrix = np.empty((6, 6), dtype=np.float64)
+        for r, oy in enumerate(range(-3, 3)):
+            for c, ox in enumerate(range(-3, 3)):
+                x, y = board._torus_check((cx + ox, cy + oy))
+                matrix[r, c] = float(board.grid[y][x])
+
+        print("m")
+        # matrix is always 6x6 now, so no empty check needed; keeping prints as-is
+        for row in matrix:
+            for j in row:
+                print(j, end="")
+            print()
+
+        avg = np.mean(matrix)
+        print("pass 4, avg =", avg)
+
+        if avg < lowest:
+            lowest = avg
+            lowest_dir = dir_enum
+    
+    move = lowest_dir.name
+    print("Return Value:", move)
+    return move
+
+
+gage_logic(1)
+        
+'''
+#-------------------------
+
+# gage_logic.py
+
+def gage_logic(player_number):
+
+    game = agent.GLOBAL_GAME
+    board = game.board
+
+    my_agent = game.agent1 if player_number == 1 else game.agent2
+    other = game.agent2 if player_number == 1 else game.agent1
+    
+    print("Pass 1")
+
+
+    head = my_agent.trail[-1]
+    direction = my_agent.direction
+    dx, dy = direction.value
+    lowest = 10000
+    lowest_dir = direction
+
+    print("pass 2")
+    
+    for dir in [(0,1), (1,0), (0,-1), (-1,0)]:
+        # if dir == -direction:
+        #     continue
+        pos = game.board._torus_check((head[0] + dx, head[1] + dy))
+
+        print("pass 3")
+        if other and other.alive and pos in (other.trail + my_agent.trail):
+            continue
+
+        cx, cy = (head[0] + 4*dx, head[1] + 4*dy)
+        matrix = game.board.grid[cx-3 : cx+3][cy-3 : cy+3]
+        print("m")
+        for i in matrix:
+            for j in i:
+                print(j, end="")
+            print()
+
+        avg = np.mean(np.array(matrix))
+        print("pass 4")
+        if lowest > avg:
+            lowest = avg
+            lowest_dir = dir
+    
+    move = Direction(lowest_dir).name
+
+
+    print("Return Value: ", move)
+
+    return move
+
+
+'''

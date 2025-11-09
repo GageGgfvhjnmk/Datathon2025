@@ -1,44 +1,36 @@
 import os
-import uuid
 from flask import Flask, request, jsonify
 from threading import Lock
 from collections import deque
-import agent_yiu_ver_1_rammer as ram
+import torch
+import numpy as np
 
-from case_closed_game import Game, Direction, GameResult, EMPTY
+from case_closed_game import Game, Direction, EMPTY
+from dqn_agent import SimpleDQNAgent
 
-# Flask API server setup
 app = Flask(__name__)
-
 GLOBAL_GAME = Game()
 LAST_POSTED_STATE = {}
-
 game_lock = Lock()
- 
-PARTICIPANT = "ParticipantX"
-AGENT_NAME = "AgentX"
 
+PARTICIPANT = "DQNMaster"
+AGENT_NAME = "TrainedDQN"
+
+# Load your trained agent
+print("Loading trained DQN agent...")
+dqn_agent = SimpleDQNAgent(state_size=15, action_size=8)
+dqn_agent.epsilon = 0.01  # Minimal exploration for actual play
+print("DQN Agent ready!")
 
 @app.route("/", methods=["GET"])
 def info():
-    """Basic health/info endpoint used by the judge to check connectivity.
-
-    Returns participant and agent_name (so Judge.check_latency can create Agent objects).
-    """
     return jsonify({"participant": PARTICIPANT, "agent_name": AGENT_NAME}), 200
 
-
 def _update_local_game_from_post(data: dict):
-    """Update the local GLOBAL_GAME using the JSON posted by the judge.
-
-    The judge posts a dictionary with keys matching the Judge.send_state payload
-    (board, agent1_trail, agent2_trail, agent1_length, agent2_length, agent1_alive,
-    agent2_alive, agent1_boosts, agent2_boosts, turn_count).
-    """
     with game_lock:
         LAST_POSTED_STATE.clear()
         LAST_POSTED_STATE.update(data)
-
+        
         if "board" in data:
             try:
                 GLOBAL_GAME.board.grid = data["board"]
@@ -64,48 +56,57 @@ def _update_local_game_from_post(data: dict):
         if "turn_count" in data:
             GLOBAL_GAME.turns = int(data["turn_count"])
 
-
 @app.route("/send-state", methods=["POST"])
 def receive_state():
-    """Judge calls this to push the current game state to the agent server. 
-
-    The agent should update its local representation and return 200.
-    """
     data = request.get_json()
     if not data:
         return jsonify({"error": "no json body"}), 400
     _update_local_game_from_post(data)
     return jsonify({"status": "state received"}), 200
 
-
 @app.route("/send-move", methods=["GET"])
 def send_move():
-    """Judge calls this (GET) to request the agent's move for the current tick.
+    player_number = request.args.get("player_number", default=1, type=int)
 
-    Query params the judge sends (optional): player_number, attempt_number,
-    random_moves_left, turn_count. Agents can use this to decide.
-    
-    Return format: {"move": "DIRECTION"} or {"move": "DIRECTION:BOOST"}
-    where DIRECTION is UP, DOWN, LEFT, or RIGHT
-    and :BOOST is optional to use a speed boost (move twice)
-    """
-    return ram.send_move()
+    with game_lock:
+        my_agent = GLOBAL_GAME.agent1 if player_number == 1 else GLOBAL_GAME.agent2
+        opponent = GLOBAL_GAME.agent2 if player_number == 1 else GLOBAL_GAME.agent1
 
-#
+    try:
+        # Get state and valid actions
+        state = dqn_agent.get_state_representation(GLOBAL_GAME, my_agent, opponent)
+        valid_actions = dqn_agent.get_valid_actions(my_agent, my_agent.boosts_remaining)
+        
+        # Choose action using trained model
+        action = dqn_agent.act(state, valid_actions)
+        
+        # Convert to move string
+        direction_idx = action // 2
+        use_boost = action % 2
+        direction_names = ["RIGHT", "LEFT", "DOWN", "UP"]
+        move = direction_names[direction_idx]
+        
+        # Add boost if chosen and available
+        if use_boost and my_agent.boosts_remaining > 0:
+            move += ":BOOST"
 
+        print(f"DQN playing {move} (boosts: {my_agent.boosts_remaining})")
+        return jsonify({"move": move}), 200
+        
+    except Exception as e:
+        print(f"Error in DQN: {e}")
+        # Fallback
+        return jsonify({"move": "RIGHT"}), 200
 
 @app.route("/end", methods=["POST"])
 def end_game():
-    """Judge notifies agent that the match finished and provides final state.
-
-    We update local state for record-keeping and return OK.
-    """
     data = request.get_json()
     if data:
         _update_local_game_from_post(data)
     return jsonify({"status": "acknowledged"}), 200
 
-
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", "5008"))
-    app.run(host="0.0.0.0", port=port, debug=True)
+    port = int(os.environ.get("PORT", "5010"))
+    print(f"DQN Agent Server starting on port {port}")
+    print(f"Participant: {PARTICIPANT}, Agent: {AGENT_NAME}")
+    app.run(host="0.0.0.0", port=port, debug=False)
